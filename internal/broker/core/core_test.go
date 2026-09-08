@@ -647,8 +647,10 @@ func TestUserBotRoutesToOwnerOnly(t *testing.T) {
 	f.hub.online[got.HarnessID] = true
 
 	// The owner mentions their bot: job on their harness, posts as the bot.
+	// Mattermost hands the listener an empty mentions list for other bots,
+	// so the name in the text is what counts.
 	p := &model.Post{Id: "t1", ChannelId: "chan", UserId: otherID, Message: "@harness-mallory ws:x hi"}
-	f.core.HandlePost(f.ctx, mattermost.PostedEvent{Post: p, ChannelType: "O", Mentions: []string{bot.UserID}})
+	f.core.HandlePost(f.ctx, mattermost.PostedEvent{Post: p, ChannelType: "O", Mentions: nil})
 	sent := f.hub.last(t, protocol.TypeJobDispatch)
 	if sent.harness != got.HarnessID {
 		t.Fatalf("dispatched to %s, want %s", sent.harness, got.HarnessID)
@@ -668,8 +670,8 @@ func TestUserBotRoutesToOwnerOnly(t *testing.T) {
 
 	// Someone else mentions it: refused, as the bot, no job.
 	before := f.hub.count(protocol.TypeJobDispatch)
-	p2 := &model.Post{Id: "t2", ChannelId: "chan", UserId: ownerID, Message: "@harness-mallory do it"}
-	f.core.HandlePost(f.ctx, mattermost.PostedEvent{Post: p2, ChannelType: "O", Mentions: []string{bot.UserID}})
+	p2 := &model.Post{Id: "t2", ChannelId: "chan", UserId: ownerID, Message: "hey @harness-mallory, do it"}
+	f.core.HandlePost(f.ctx, mattermost.PostedEvent{Post: p2, ChannelType: "O", Mentions: nil})
 	if f.hub.count(protocol.TypeJobDispatch) != before {
 		t.Fatal("job dispatched for non-owner")
 	}
@@ -730,5 +732,17 @@ func TestDefaultBotName(t *testing.T) {
 	}
 	if got := defaultBotName("a-very-long-username-here"); len(got) > maxBotNameLength || strings.HasSuffix(got, "-") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestMentionedNames(t *testing.T) {
+	got := mentionedNames("hey @Harness-Mallory, ask @cc. mail me@example.com and @x_y-")
+	for _, want := range []string{"harness-mallory", "cc", "x_y"} {
+		if !got[want] {
+			t.Errorf("missing %q in %v", want, got)
+		}
+	}
+	if got["example.com"] {
+		t.Errorf("email local part must not count as a mention: %v", got)
 	}
 }

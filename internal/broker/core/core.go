@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -165,27 +166,51 @@ type mention struct {
 	ownerName string
 }
 
+// Mattermost trims the `mentions` of a posted event to the receiving
+// connection, so the listener only ever sees itself there. User bots are
+// therefore recognised from the @names in the text.
 func (c *Core) mentionedBot(ctx context.Context, ev mattermost.PostedEvent) (mention, bool) {
-	var shared bool
+	names := mentionedNames(ev.Post.Message)
+	if len(names) > 0 {
+		bots, err := c.st.ListBots(ctx)
+		if err != nil {
+			c.log.Error("list bots", "err", err)
+		}
+		for _, b := range bots {
+			if !names[b.Username] {
+				continue
+			}
+			m := mention{userID: b.UserID, username: b.Username, owner: b.MMUserID, ownerName: b.MMUserID}
+			if u, err := c.mm.GetUser(ctx, b.MMUserID); err == nil {
+				m.ownerName = u.Username
+			}
+			return m, true
+		}
+	}
 	for _, id := range ev.Mentions {
 		if id == c.cfg.BotUserID {
-			shared = true
-			continue
+			return mention{userID: c.cfg.BotUserID, username: c.cfg.BotUsername}, true
 		}
-		b, err := c.st.BotByUserID(ctx, id)
-		if err != nil {
-			continue
-		}
-		m := mention{userID: b.UserID, username: b.Username, owner: b.MMUserID, ownerName: b.MMUserID}
-		if u, err := c.mm.GetUser(ctx, b.MMUserID); err == nil {
-			m.ownerName = u.Username
-		}
-		return m, true
 	}
-	if shared {
+	if names[c.cfg.BotUsername] {
 		return mention{userID: c.cfg.BotUserID, username: c.cfg.BotUsername}, true
 	}
 	return mention{}, false
+}
+
+var mentionRegex = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])@([A-Za-z0-9][A-Za-z0-9._-]*)`)
+
+// mentionedNames returns the @names in a message, lower-cased, without
+// trailing punctuation.
+func mentionedNames(text string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range mentionRegex.FindAllStringSubmatch(text, -1) {
+		name := strings.ToLower(strings.TrimRight(m[1], ".,;:!?-_"))
+		if name != "" {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func (c *Core) handleDM(ctx context.Context, p *model.Post) {
