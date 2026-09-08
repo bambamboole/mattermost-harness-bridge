@@ -191,10 +191,11 @@ messages posted under that bot's identity.
 
 This is a breaking change. Upgrade the broker and local harness binaries together:
 the wire endpoint is now `/harness/v2`, and every dispatch includes its bot ID.
-Complete OAuth installation, remove the old manually managed `/harness` command
-if it conflicts, and initialize new bots. The broker preserves existing records
-but does not automatically bind old bots to a harness. Old thread-only session
-entries are not reused. The legacy `mhb harness pair` command is removed.
+Start with a fresh broker database: `0001_init.sql` contains the complete schema,
+and existing databases are not migrated. Complete OAuth installation, remove the
+old manually managed `/harness` command if it conflicts, and initialize new bots.
+Old thread-only session entries are not reused. The legacy `mhb harness pair`
+command is removed.
 
 Config lives in `~/Library/Application Support/mm-harness/config.json`
 (`$XDG_CONFIG_HOME/mm-harness` on Linux). Relevant keys:
