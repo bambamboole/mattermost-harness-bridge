@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/bambamboole/mattermost-harness-bridge/compare/v0.2.0...v0.2.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **docker:** let the nonroot broker create its database in /data ([5009191](https://github.com/bambamboole/mattermost-harness-bridge/commit/5009191911a01d90b22eae8767577dd0ed4913fb))
+
 ## [0.2.0](https://github.com/bambamboole/mattermost-harness-bridge/compare/v0.1.0...v0.2.0) (2026-09-08)
 
 
