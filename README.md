@@ -5,7 +5,7 @@ machine**: your repos, your Claude login, your context. Tool calls that need
 permission become Allow/Deny buttons in the thread.
 
 ```
-Mattermost (cloud, bot @cc)
+Mattermost (cloud, bot @harness)
       ^ WS events down / REST posts up
       v
 Broker (Go, public)                     mhb broker
@@ -62,8 +62,8 @@ approval callback. Nothing else on the server changes.
 1. System Console → Integrations → Bot Accounts → *Enable Bot Account
    Creation*: true.
 2. Product menu (top left) → Integrations → Bot Accounts → *Add Bot Account*.
-   Username `cc` (this is what people mention), display name and icon as you
-   like, role *Member*. It never needs `post:all` or admin rights: it only
+   Username `harness` (this is what people mention), display name and icon
+   as you like, role *Member*. It never needs `post:all` or admin rights: it only
    posts into threads of channels it belongs to and into direct messages.
 3. On the bot, *Create New Token*, description `broker`. Copy it: this is
    `MM_BOT_TOKEN`. The same token authenticates the WebSocket event stream.
@@ -74,9 +74,9 @@ approval callback. Nothing else on the server changes.
 ### 2. Team and channel membership
 
 The broker only receives `posted` events for channels the bot is a member
-of. Add the bot to every team (`/invite @cc` from any channel of that team,
+of. Add the bot to every team (`/invite @harness` from any channel of that team,
 or System Console → User Management → Teams) and to every channel where it
-should react (`/invite @cc` in the channel, or *Add people*). Private
+should react (`/invite @harness` in the channel, or *Add people*). Private
 channels work the same way. Direct messages to the bot need no setup;
 pairing (`pair` in a DM) works as soon as the bot exists.
 
@@ -107,15 +107,15 @@ With [`@bambamboole/pulumi-mattermost`](https://github.com/bambamboole/pulumi-pr
 ```ts
 import * as mattermost from "@bambamboole/pulumi-mattermost";
 
-const cc = new mattermost.Bot("cc", {
-    username: "cc",
+const harness = new mattermost.Bot("harness", {
+    username: "harness",
     displayName: "Claude Code",
     description: "Runs Claude Code jobs on the mentioning user's machine",
 });
-new mattermost.TeamMember("cc", { teamId: team.id, userId: cc.userId });
-new mattermost.ChannelMember("cc-dev", { channelId: dev.id, userId: cc.userId });
-const brokerToken = new mattermost.AccessToken("cc-broker", {
-    userId: cc.userId,
+new mattermost.TeamMember("harness", { teamId: team.id, userId: harness.userId });
+new mattermost.ChannelMember("harness-dev", { channelId: dev.id, userId: harness.userId });
+const brokerToken = new mattermost.AccessToken("harness-broker", {
+    userId: harness.userId,
     description: "broker",
 });
 export const mmBotToken = pulumi.secret(brokerToken.token); // -> MM_BOT_TOKEN
@@ -127,12 +127,12 @@ server setting involved.
 ### 5. Smoke test
 
 1. DM the bot `pair`: it answers with an `mhb harness pair …` line.
-2. In a channel the bot is in, post `@cc help`: it answers in a thread.
+2. In a channel the bot is in, post `@harness help`: it answers in a thread.
    No answer means the bot is not a channel member or the WebSocket did not
    connect (check the broker log for `mattermost websocket connected`).
-3. Pair a harness, post `@cc ws:<name> run git status`: the status post
+3. Pair a harness, post `@harness ws:<name> run git status`: the status post
    turns into a running state and then a result.
-4. Trigger an approval, for example `@cc create a file called hello.txt`,
+4. Trigger an approval, for example `@harness create a file called hello.txt`,
    and click *Allow*. If the click shows a spinner and nothing happens,
    Mattermost cannot reach `PUBLIC_URL/callback/approval`; the server log
    then contains the outgoing request error.
@@ -183,10 +183,10 @@ back. `--dangerously-skip-permissions` is never used.
 
 ## Using it
 
-- `@cc ws:infra bump the mattermost provider` starts a job in workspace `infra`.
+- `@harness ws:infra bump the mattermost provider` starts a job in workspace `infra`.
 - Reply in the same thread to continue: the harness resumes the Claude
   session it kept for that thread. `ws:` can be omitted then.
-- `@cc cancel` in a thread stops the job.
+- `@harness cancel` in a thread stops the job.
 - DM the bot: `pair`, `status`.
 
 ## Releases

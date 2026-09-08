@@ -12,9 +12,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X github.com/bambamboole/mattermost-harness-bridge/internal/version.Version=$VERSION" \
     -o /out/mhb ./cmd/mhb
+# A named volume mounted on /data inherits this directory's owner, which is
+# what lets the nonroot process create the SQLite database there.
+RUN mkdir -p /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/mhb /mhb
+COPY --from=build --chown=nonroot:nonroot /out/data /data
 ENV DB_PATH=/data/broker.db LISTEN_ADDR=:8080
 VOLUME /data
 EXPOSE 8080
