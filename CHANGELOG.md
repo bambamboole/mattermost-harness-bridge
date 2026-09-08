@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/bambamboole/mattermost-harness-bridge/compare/v0.1.0...v0.2.0) (2026-09-08)
+
+
+### Features
+
+* **cli:** single mhb binary with cobra subcommands ([ef0deea](https://github.com/bambamboole/mattermost-harness-bridge/commit/ef0deea3b5b41b9ff177b966088230d154fbb268))
+
 ## 0.1.0 (2026-09-08)
 
 
