@@ -18,7 +18,8 @@ claude -p … | codex exec … (subprocess per job)
 ```
 
 Harnesses connect *outbound* to the broker over WebSocket. Nothing ever
-connects to a laptop. Only the owner of a harness can trigger it.
+connects to a laptop. Only the owner of a harness can trigger it —
+[SECURITY.md](SECURITY.md) spells out what that does and does not protect.
 
 One binary, `mhb`, serves both roles: `mhb broker` on the server,
 `mhb harness …` on developer machines.
@@ -202,6 +203,14 @@ Every setting is also a flag (`mhb broker --help`): `--mm-url`, `--mm-bot-token`
 `--grace-period`, `--job-timeout`, `--min-harness-version`. Flags win over
 environment variables.
 
+`--min-harness-version` compares dotted numbers and treats anything it
+cannot parse as older, so setting it locks out harnesses built from source
+(their version is `dev`). `GET /healthz` answers `ok` for a load balancer.
+
+The database at `DB_PATH` holds the per-user bot tokens in plaintext, because
+posting as a user's bot needs them. Keep it on a volume only the broker
+reads; see [SECURITY.md](SECURITY.md) for the whole trust model.
+
 ## Harness setup (each developer)
 
 ```sh
@@ -230,7 +239,9 @@ second machine runs `init` again and shares the bot.
 - Brokers without `MM_ADMIN_TOKEN` keep the old flow: DM `pair` to the shared bot and `mhb harness pair`.
 
 Config lives in `~/Library/Application Support/mm-harness/config.json`
-(`$XDG_CONFIG_HOME/mm-harness` on Linux). Relevant keys:
+(`$XDG_CONFIG_HOME/mm-harness` on Linux); `mhb harness config` prints it with
+the token redacted (`--show-secrets` to see it). `mhb harness workspace
+add|rm|list` edits the directory list. Relevant keys:
 
 - `workspaces`: name → absolute directory, picked with `ws:<name>` in the message.
 - `default_workspace`: where jobs run that name no workspace and continue no thread; created on start, default `~/.harness`. `mhb harness run --default-workspace <dir>` overrides it.
@@ -294,9 +305,13 @@ docker run --rm -p 8080:8080 -v broker-data:/data \
 ```sh
 go test ./... -race      # unit, store conformance, end-to-end
 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.0 run ./...
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean --skip=publish
 docker build -t mhb:local .
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the commit-message rules
+release-please depends on and what to do when the wire protocol changes.
 
 The permission-tool contract was verified against claude 2.1.263: the tool
 receives `{"tool_name","input","tool_use_id"}` and returns a JSON string
@@ -308,6 +323,11 @@ receives `{"tool_name","input","tool_use_id"}` and returns a JSON string
 - Approval posts are only rewritten on click; expired ones keep their buttons (clicking says so).
 - Per-channel default workspace on the broker; today it is `ws:` in the message, else the thread's previous workspace, else the only configured one.
 - `--include-partial-messages` streaming; progress currently updates per assistant message.
+- No `mhb harness unpair` / broker-side harness removal; the store supports it, the CLI does not.
+- `POST /init` and `GET /init/{code}` are unauthenticated and unthrottled. The
+  codes are 40 bits and live 10 minutes, but a rate limit belongs in front of them.
+- Retention: acked outbox rows are swept after 24 h, jobs, approvals, expired
+  onboarding codes and the audit log are kept forever.
 
 ## License
 
