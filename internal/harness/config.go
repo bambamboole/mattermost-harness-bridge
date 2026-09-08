@@ -17,9 +17,16 @@ type Config struct {
 	OwnerMMUserID string `json:"owner_mm_user_id"`
 	Name          string `json:"name"`
 
-	// Workspaces maps a short name to an absolute directory. Only these
-	// directories are ever handed to Claude.
-	Workspaces map[string]string `json:"workspaces"`
+	// Workspaces maps a short name to an absolute directory. Jobs that name
+	// none and continue no thread run in DefaultWorkspace, created on start.
+	Workspaces       map[string]string `json:"workspaces"`
+	DefaultWorkspace string            `json:"default_workspace"`
+
+	// Agent is the coding agent jobs run on unless the message says
+	// otherwise: "claude" or "codex".
+	Agent        string `json:"agent"`
+	CodexBin     string `json:"codex_bin"`
+	CodexSandbox string `json:"codex_sandbox"`
 
 	// AllowedTools run without asking; everything else goes through the
 	// approval flow. DisallowedTools never run.
@@ -36,6 +43,10 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Workspaces:         map[string]string{},
+		DefaultWorkspace:   filepath.Join(homeDir(), ".harness"),
+		Agent:              "claude",
+		CodexBin:           "codex",
+		CodexSandbox:       "workspace-write",
 		AllowedTools:       []string{"Read", "Grep", "Glob", "LS", "WebSearch", "WebFetch"},
 		DisallowedTools:    []string{},
 		MaxJobs:            1,
@@ -111,7 +122,22 @@ func (c Config) Validate() error {
 	if c.MaxJobs <= 0 {
 		return errors.New("max_jobs must be >= 1")
 	}
+	if c.DefaultWorkspace == "" || !filepath.IsAbs(c.DefaultWorkspace) {
+		return errors.New("default_workspace must be an absolute path")
+	}
+	switch c.Agent {
+	case "claude", "codex":
+	default:
+		return fmt.Errorf("agent must be \"claude\" or \"codex\", got %q", c.Agent)
+	}
 	return nil
+}
+
+func homeDir() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return os.Getenv("HOME")
 }
 
 // WSURL derives the WebSocket endpoint from BrokerURL.

@@ -1,4 +1,4 @@
-package runner
+package claude
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bambamboole/mattermost-harness-bridge/internal/harness/agent"
 )
 
 // Lines captured from claude 2.1.263, trimmed to the fields we read.
@@ -18,8 +20,8 @@ const sample = `{"type":"system","subtype":"init","cwd":"/tmp","session_id":"ses
 `
 
 func TestParseSample(t *testing.T) {
-	var events []Event
-	st := parse(strings.NewReader(sample), func(e Event) { events = append(events, e) })
+	var events []agent.Event
+	st := parse(strings.NewReader(sample), func(e agent.Event) { events = append(events, e) })
 	if st.sessionID != "sess-1" || !st.sawResult || st.isError || st.turns != 2 || st.cost != 0.016 || st.durationMS != 4027 {
 		t.Fatalf("state: %+v", st)
 	}
@@ -60,15 +62,15 @@ cat <<'EOF'
 `)
 	argsFile := filepath.Join(t.TempDir(), "args")
 	t.Setenv("FAKE_ARGS", argsFile)
-	res, err := Run(context.Background(), Options{
-		ClaudeBin: bin, Dir: t.TempDir(), Prompt: "hi", MaxTurns: 5,
-		ResumeSessionID: "old", MCPConfigPath: "/x/mcp.json", PermissionTool: "mcp__harness__approve",
+	res, err := New(bin).Run(context.Background(), agent.Options{
+		Dir: t.TempDir(), Prompt: "hi", MaxTurns: 5,
+		ResumeID: "old", PermissionMCPConfigPath: "/x/mcp.json", PermissionTool: "mcp__harness__approve",
 		AllowedTools: []string{"Read", "Grep"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Status != StatusSucceeded || res.SessionID != "sess-1" || res.Text != "Created the file." || res.Turns != 2 {
+	if res.Status != agent.StatusSucceeded || res.SessionID != "sess-1" || res.Text != "Created the file." || res.Turns != 2 {
 		t.Fatalf("result: %+v", res)
 	}
 	args, _ := os.ReadFile(argsFile)
@@ -85,11 +87,11 @@ func TestRunCrashWithoutResult(t *testing.T) {
 echo "boom: not logged in" >&2
 exit 1
 `)
-	res, err := Run(context.Background(), Options{ClaudeBin: bin, Dir: t.TempDir(), Prompt: "x"}, nil)
+	res, err := New(bin).Run(context.Background(), agent.Options{Dir: t.TempDir(), Prompt: "x"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Status != StatusFailed || res.ErrCode != "claude_exit" || !strings.Contains(res.ErrMessage, "not logged in") {
+	if res.Status != agent.StatusFailed || res.ErrCode != "claude_exit" || !strings.Contains(res.ErrMessage, "not logged in") {
 		t.Fatalf("result: %+v", res)
 	}
 }
@@ -106,11 +108,13 @@ wait $!
 		cancel()
 	}()
 	start := time.Now()
-	res, err := Run(ctx, Options{ClaudeBin: bin, Dir: t.TempDir(), Prompt: "x", KillGrace: time.Second}, nil)
+	a := New(bin)
+	a.KillGrace = time.Second
+	res, err := a.Run(ctx, agent.Options{Dir: t.TempDir(), Prompt: "x"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Status != StatusCancelled {
+	if res.Status != agent.StatusCancelled {
 		t.Fatalf("result: %+v", res)
 	}
 	if time.Since(start) > 5*time.Second {

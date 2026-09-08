@@ -1,8 +1,9 @@
 # mattermost-harness-bridge
 
-Mention a bot in Mattermost, and Claude Code runs the job on **your own
-machine**: your repos, your Claude login, your context. Tool calls that need
-permission become Allow/Deny buttons in the thread.
+Mention a bot in Mattermost, and a coding agent (Claude Code or Codex)
+runs the job on **your own machine**: your repos, your logins, your
+context. With Claude Code, tool calls that need permission become
+Allow/Deny buttons in the thread.
 
 ```
 Mattermost (cloud, bot @harness)
@@ -13,7 +14,7 @@ Broker (Go, public)                     mhb broker
       v
 Harness (Go, one per developer, NAT)    mhb harness run
       v
-claude -p ... (subprocess per job)
+claude -p … | codex exec … (subprocess per job)
 ```
 
 Harnesses connect *outbound* to the broker over WebSocket. Nothing ever
@@ -32,8 +33,8 @@ One binary, `mhb`, serves both roles: `mhb broker` on the server,
 | `internal/broker/hub` | WebSocket server for harnesses: auth, heartbeat, outbox delivery, connection replacement |
 | `internal/broker/core` | Routing, approvals with signed callbacks, pairing, sweeper (queue TTL, lost harnesses, timeouts) |
 | `internal/broker/mattermost` | Thin adapter over the official `model.Client4` and its WebSocket client |
-| `internal/harness` | Daemon: broker client with reconnect, job runner, permission bridge, thread→session map |
-| `internal/harness/runner` | Drives `claude -p --output-format stream-json` |
+| `internal/harness` | Daemon: broker client with reconnect, workspace and agent selection, permission bridge, thread→session map |
+| `internal/harness/agent` | The agent interface; `claude/` drives `claude -p --output-format stream-json`, `codex/` drives `codex exec --json` |
 | `internal/harness/permission` | `--permission-prompt-tool` bridge: MCP stdio subcommand → Unix socket → daemon → broker |
 | `internal/e2e` | Real hub + real harness + fake `claude` over a live WebSocket |
 
@@ -171,21 +172,40 @@ mhb harness run
 Config lives in `~/Library/Application Support/mm-harness/config.json`
 (`$XDG_CONFIG_HOME/mm-harness` on Linux). Relevant keys:
 
-- `workspaces`: name → absolute directory. Only these are ever handed to Claude.
-- `allowed_tools`: run without asking (default: Read, Grep, Glob, LS, WebSearch, WebFetch).
-- `disallowed_tools`: never run.
+- `workspaces`: name → absolute directory, picked with `ws:<name>` in the message.
+- `default_workspace`: where jobs run that name no workspace and continue no thread; created on start, default `~/.harness`. `mhb harness run --default-workspace <dir>` overrides it.
+- `agent`: `claude` (default) or `codex`, for jobs that name none with `agent:<name>`; `--agent` overrides it. Both agents are registered when their binary is found.
+- `allowed_tools`: run without asking (default: Read, Grep, Glob, LS, WebSearch, WebFetch); `disallowed_tools`: never run. Both apply to Claude Code.
+- `codex_bin`, `codex_sandbox` (`workspace-write` by default, or `read-only`).
 - `max_jobs`, `default_max_turns`, `approval_timeout_min`, `claude_bin`, `model`.
 
-Everything else goes through the approval flow: the CLI calls the
-harness's MCP permission tool, the harness sends `approval.request`, the
-broker posts Allow/Deny buttons, the owner clicks, the decision travels
-back. `--dangerously-skip-permissions` is never used.
+### Agents
+
+**Claude Code** runs `claude -p` with the permission bridge: every tool
+call outside `allowed_tools` calls the harness's MCP permission tool, the
+harness sends `approval.request`, the broker posts Allow/Deny buttons, the
+owner clicks, the decision travels back. `--dangerously-skip-permissions`
+is never used.
+
+**Codex** runs `codex exec --json` inside Codex's own sandbox
+(`codex_sandbox`, `workspace-write` by default: it can change files in the
+workspace, nothing else, and has no network). `codex exec` cannot ask a
+human, so there are no approval buttons for Codex jobs; the sandbox is the
+guard rail. A human-in-the-loop bridge through `codex app-server` is a
+possible later step.
+
+A thread sticks to the agent and workspace of its first job; `agent:` or
+`ws:` in a later message starts a fresh session there.
 
 ## Using it
 
-- `@harness ws:infra bump the mattermost provider` starts a job in workspace `infra`.
-- Reply in the same thread to continue: the harness resumes the Claude
-  session it kept for that thread. `ws:` can be omitted then.
+- `@harness ws:infra bump the mattermost provider` starts a job in workspace `infra`; without `ws:` it runs in the harness's default folder.
+- `@harness agent:codex …` picks the agent; without `agent:` the harness's default is used.
+- Reply in the same thread to continue: the harness resumes the agent
+  session it kept for that thread. `ws:` and `agent:` can be omitted then.
+- Mentioning the bot for the first time inside an existing thread hands the
+  agent the thread so far (the last 60 posts, without the bot's own), so
+  "do what the thread says" works.
 - `@harness cancel` in a thread stops the job.
 - DM the bot: `pair`, `status`.
 

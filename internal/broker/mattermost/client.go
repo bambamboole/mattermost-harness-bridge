@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,6 +24,8 @@ type API interface {
 	CreatePost(ctx context.Context, p *model.Post) (*model.Post, error)
 	UpdatePost(ctx context.Context, id, message string, props map[string]any) error
 	GetPost(ctx context.Context, id string) (*model.Post, error)
+	// GetThread returns the root and every reply of a thread in post order.
+	GetThread(ctx context.Context, rootID string) ([]*model.Post, error)
 	GetUser(ctx context.Context, id string) (*model.User, error)
 	DirectChannel(ctx context.Context, botID, userID string) (string, error)
 	UploadFile(ctx context.Context, channelID, name string, data []byte) (*model.FileInfo, error)
@@ -64,6 +67,22 @@ func (c *Client) GetUser(ctx context.Context, id string) (*model.User, error) {
 func (c *Client) GetPost(ctx context.Context, id string) (*model.Post, error) {
 	p, _, err := c.c.GetPost(ctx, id, "")
 	return p, wrap("get post", err)
+}
+
+func (c *Client) GetThread(ctx context.Context, rootID string) ([]*model.Post, error) {
+	list, _, err := c.c.GetPostThread(ctx, rootID, "", false)
+	if err != nil {
+		return nil, wrap("get thread", err)
+	}
+	posts := make([]*model.Post, 0, len(list.Order))
+	for _, id := range list.Order {
+		if p := list.Posts[id]; p != nil {
+			posts = append(posts, p)
+		}
+	}
+	// Order is newest first; callers want the conversation top to bottom.
+	sort.Slice(posts, func(i, j int) bool { return posts[i].CreateAt < posts[j].CreateAt })
+	return posts, nil
 }
 
 func (c *Client) CreatePost(ctx context.Context, p *model.Post) (*model.Post, error) {

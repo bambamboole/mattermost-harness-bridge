@@ -95,7 +95,8 @@ func fakeClaude() {
 		time.Sleep(30 * time.Second)
 	}
 	emit(map[string]any{"type": "result", "subtype": "success", "is_error": false, "num_turns": 2, "session_id": sessionID,
-		"result": fmt.Sprintf("final decision=%s resume=%s cwd=%s", decision, resume, mustCwd()), "total_cost_usd": 0.01, "duration_ms": 10})
+		"result":         fmt.Sprintf("final decision=%s resume=%s cwd=%s thread=%t", decision, resume, mustCwd(), strings.Contains(prompt, "<thread>")),
+		"total_cost_usd": 0.01, "duration_ms": 10})
 }
 
 func mustCwd() string {
@@ -165,7 +166,9 @@ func newWorld(t *testing.T) *world {
 	hcfg.Token = token
 	hcfg.OwnerMMUserID = ownerID
 	hcfg.Workspaces = map[string]string{"ws": ws}
+	hcfg.DefaultWorkspace, _ = filepath.EvalSymlinks(t.TempDir())
 	hcfg.ClaudeBin = self
+	hcfg.CodexBin = "/nonexistent/codex" // only the fake claude exists here
 	hcfg.ApprovalTimeoutMin = 1
 	hcfg.MaxJobs = 2
 
@@ -330,4 +333,42 @@ func TestResultSurvivesBrokerDisconnect(t *testing.T) {
 	}
 	w.mention("@cc cancel", trigger.Id)
 	job = w.waitState(job.ID, store.JobCancelled)
+}
+
+func TestDefaultWorkspaceAndThreadHistory(t *testing.T) {
+	w := newWorld(t)
+
+	// No ws: token and no session: the job runs in the default workspace.
+	trigger := w.mention("@cc just answer", "")
+	job := w.waitState(w.jobFor(trigger.Id).ID, store.JobSucceeded, store.JobFailed)
+	if job.State != store.JobSucceeded || !strings.Contains(job.ResultText, "cwd="+w.hcfg.DefaultWorkspace) || !strings.Contains(job.ResultText, "thread=false") {
+		t.Fatalf("job 1: %+v", job)
+	}
+
+	// A mention inside a thread the bot has never seen carries the thread.
+	root, _ := w.mm.CreatePost(w.ctx, &model.Post{Id: "", ChannelId: "chan", UserId: ownerID, Message: "we should rename the module", CreateAt: 1})
+	_, _ = w.mm.CreatePost(w.ctx, &model.Post{ChannelId: "chan", UserId: ownerID, RootId: root.Id, Message: "and bump the version", CreateAt: 2})
+	trigger2 := w.mention("@cc do what the thread says", root.Id)
+	job2 := w.waitState(w.jobFor(root.Id).ID, store.JobSucceeded, store.JobFailed)
+	if job2.State != store.JobSucceeded || !strings.Contains(job2.ResultText, "thread=true") || !strings.Contains(job2.ResultText, "cwd="+w.hcfg.DefaultWorkspace) {
+		t.Fatalf("job 2: %+v", job2)
+	}
+	_ = trigger2
+
+	// The follow-up resumes the session, so the thread is not repeated.
+	w.mention("@cc and now?", root.Id)
+	var job3 store.Job
+	w.wait("third job", func() bool {
+		jobs, _ := w.st.ListJobs(w.ctx, store.JobFilter{RootPostID: root.Id, Limit: 5})
+		for _, j := range jobs {
+			if j.ID != job2.ID && j.State.Terminal() {
+				job3 = j
+				return true
+			}
+		}
+		return false
+	})
+	if !strings.Contains(job3.ResultText, "resume=sess-") || !strings.Contains(job3.ResultText, "thread=false") {
+		t.Fatalf("job 3: %+v", job3)
+	}
 }

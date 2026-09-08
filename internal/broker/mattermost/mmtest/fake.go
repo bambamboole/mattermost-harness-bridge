@@ -67,6 +67,19 @@ func (f *Fake) GetPost(ctx context.Context, id string) (*model.Post, error) {
 	return p.Clone(), nil
 }
 
+func (f *Fake) GetThread(ctx context.Context, rootID string) ([]*model.Post, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*model.Post
+	for _, id := range f.Order {
+		p := f.Posts[id]
+		if p.Id == rootID || p.RootId == rootID {
+			out = append(out, p.Clone())
+		}
+	}
+	return out, nil
+}
+
 func (f *Fake) GetUser(ctx context.Context, id string) (*model.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -117,6 +117,7 @@ const (
 	NackBusy             = "busy"
 	NackBadPayload       = "bad_payload"
 	NackForbidden        = "forbidden"
+	NackAgentUnknown     = "agent_unknown"
 )
 
 // Error reports a protocol-level problem with a previous message (Ref).
@@ -201,15 +202,28 @@ type Limits struct {
 	TimeoutMS int `json:"timeout_ms,omitempty"`
 }
 
+// HistoryPost is one earlier post of the thread a job was started in.
+type HistoryPost struct {
+	Username string `json:"username"`
+	At       int64  `json:"at"` // unix ms
+	Text     string `json:"text"`
+}
+
 // JobDispatch asks the harness to run a job. The harness verifies that
 // Requester matches its owner and nacks with NackForbidden otherwise.
+//
+// Agent names the coding agent ("claude", "codex"); empty means the
+// harness's default. History carries the thread's earlier posts; the
+// harness uses it only when it has no session for the thread yet.
 type JobDispatch struct {
-	Workspace   string    `json:"workspace"`
-	Prompt      string    `json:"prompt"`
-	Thread      Thread    `json:"thread"`
-	Requester   Requester `json:"requester"`
-	Attachments []File    `json:"attachments,omitempty"`
-	Limits      Limits    `json:"limits"`
+	Workspace   string        `json:"workspace"`
+	Agent       string        `json:"agent,omitempty"`
+	Prompt      string        `json:"prompt"`
+	Thread      Thread        `json:"thread"`
+	Requester   Requester     `json:"requester"`
+	Attachments []File        `json:"attachments,omitempty"`
+	History     []HistoryPost `json:"history,omitempty"`
+	Limits      Limits        `json:"limits"`
 }
 
 type JobCancel struct {

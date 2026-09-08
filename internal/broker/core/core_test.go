@@ -514,3 +514,47 @@ func TestSplitWorkspace(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitAgent(t *testing.T) {
+	cases := map[string][2]string{
+		"agent:codex fix the build":  {"codex", "fix the build"},
+		"fix the build agent:Claude": {"claude", "fix the build"},
+		"`agent:codex`, go":          {"codex", "go"},
+		"fix the build":              {"", "fix the build"},
+		"agent: go":                  {"", "agent: go"},
+	}
+	for in, want := range cases {
+		ag, prompt := splitAgent(in)
+		if ag != want[0] || prompt != want[1] {
+			t.Errorf("splitAgent(%q) = %q, %q; want %q, %q", in, ag, prompt, want[0], want[1])
+		}
+	}
+}
+
+func TestMentionCarriesAgentAndThreadHistory(t *testing.T) {
+	f := newFixture(t)
+	root, _ := f.mm.CreatePost(f.ctx, &model.Post{ChannelId: "chan", UserId: otherID, Message: "@cc please look", CreateAt: 10})
+	_, _ = f.mm.CreatePost(f.ctx, &model.Post{ChannelId: "chan", UserId: botID, RootId: root.Id, Message: "▶️ Running", CreateAt: 11})
+	_, _ = f.mm.CreatePost(f.ctx, &model.Post{ChannelId: "chan", UserId: ownerID, RootId: root.Id, Message: "the build is red", CreateAt: 12})
+
+	p := &model.Post{Id: "trig", ChannelId: "chan", UserId: ownerID, RootId: root.Id, Message: "@cc agent:codex ws:infra fix it", CreateAt: 13}
+	f.core.HandlePost(f.ctx, mattermost.PostedEvent{Post: p, ChannelType: "O", Mentions: []string{botID}})
+	sent := f.hub.last(t, protocol.TypeJobDispatch)
+	var d protocol.JobDispatch
+	_ = sent.env.Decode(&d)
+	if d.Agent != "codex" || d.Workspace != "infra" || d.Prompt != "fix it" {
+		t.Fatalf("dispatch: %+v", d)
+	}
+	if len(d.History) != 2 || d.History[0].Username != "mallory" || d.History[0].Text != "please look" || d.History[1].Text != "the build is red" {
+		t.Fatalf("history: %+v", d.History)
+	}
+
+	// A mention that starts a thread carries no history.
+	f.mention(ownerID, "@cc fresh", "")
+	sent = f.hub.last(t, protocol.TypeJobDispatch)
+	var fresh protocol.JobDispatch
+	_ = sent.env.Decode(&fresh)
+	if len(fresh.History) != 0 || fresh.Agent != "" {
+		t.Fatalf("fresh dispatch: %+v", fresh)
+	}
+}

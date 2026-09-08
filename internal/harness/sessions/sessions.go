@@ -14,6 +14,7 @@ import (
 type Entry struct {
 	SessionID string    `json:"session_id"`
 	Workspace string    `json:"workspace"`
+	Agent     string    `json:"agent"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -45,10 +46,10 @@ func (s *Map) Get(rootPostID string) (Entry, bool) {
 	return e, ok
 }
 
-func (s *Map) Put(rootPostID, sessionID, workspace string) error {
+func (s *Map) Put(rootPostID, sessionID, workspace, agent string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.m[rootPostID] = Entry{SessionID: sessionID, Workspace: workspace, UpdatedAt: time.Now().UTC()}
+	s.m[rootPostID] = Entry{SessionID: sessionID, Workspace: workspace, Agent: agent, UpdatedAt: time.Now().UTC()}
 	return s.flush()
 }
 

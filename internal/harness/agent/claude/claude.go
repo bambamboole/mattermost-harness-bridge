@@ -1,6 +1,7 @@
-// Package runner drives one `claude -p` subprocess per job and turns its
-// stream-json output into progress events and a final result.
-package runner
+// Package claude drives one `claude -p` subprocess per job and turns its
+// stream-json output into progress events and a final result. Tool calls
+// that need permission go through the harness's MCP permission server.
+package claude
 
 import (
 	"bufio"
@@ -16,53 +17,37 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/bambamboole/mattermost-harness-bridge/internal/harness/agent"
 )
 
-type Options struct {
-	ClaudeBin          string
-	Dir                string
-	Prompt             string
-	ResumeSessionID    string
-	MaxTurns           int
-	AllowedTools       []string
-	DisallowedTools    []string
-	MCPConfigPath      string
-	PermissionTool     string
-	SystemPromptAppend string
-	Model              string
+// Agent runs the Claude Code CLI.
+type Agent struct {
+	Bin string
 	// KillGrace is how long to wait after SIGINT before SIGKILL.
 	KillGrace time.Duration
 }
 
-// Event is emitted as the run progresses. Text is the accumulated assistant
-// output so far (a snapshot, ready for the status post).
-type Event struct {
-	SessionID   string
-	Text        string
-	CurrentTool string
-	Turns       int
+func New(bin string) *Agent {
+	if bin == "" {
+		bin = "claude"
+	}
+	return &Agent{Bin: bin}
 }
 
-type Result struct {
-	Status     string // succeeded | failed | cancelled
-	Text       string
-	SessionID  string
-	Turns      int
-	CostUSD    float64
-	DurationMS int64
-	ErrCode    string
-	ErrMessage string
-}
+func (a *Agent) Name() string    { return agent.Claude }
+func (a *Agent) Approvals() bool { return true }
 
-const (
-	StatusSucceeded = "succeeded"
-	StatusFailed    = "failed"
-	StatusCancelled = "cancelled"
-)
+func (a *Agent) Check() error {
+	if _, err := exec.LookPath(a.Bin); err != nil {
+		return fmt.Errorf("%w: %v", ErrNoClaude, err)
+	}
+	return nil
+}
 
 // Run blocks until the subprocess exits. Cancelling ctx sends SIGINT, then
 // SIGKILL after KillGrace, and yields StatusCancelled.
-func Run(ctx context.Context, opt Options, onEvent func(Event)) (Result, error) {
+func (a *Agent) Run(ctx context.Context, opt agent.Options, onEvent func(agent.Event)) (agent.Result, error) {
 	args := []string{
 		"-p", opt.Prompt,
 		"--output-format", "stream-json",
@@ -73,11 +58,11 @@ func Run(ctx context.Context, opt Options, onEvent func(Event)) (Result, error) 
 	if opt.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(opt.MaxTurns))
 	}
-	if opt.ResumeSessionID != "" {
-		args = append(args, "--resume", opt.ResumeSessionID)
+	if opt.ResumeID != "" {
+		args = append(args, "--resume", opt.ResumeID)
 	}
-	if opt.MCPConfigPath != "" {
-		args = append(args, "--mcp-config", opt.MCPConfigPath, "--strict-mcp-config")
+	if opt.PermissionMCPConfigPath != "" {
+		args = append(args, "--mcp-config", opt.PermissionMCPConfigPath, "--strict-mcp-config")
 	}
 	if opt.PermissionTool != "" {
 		args = append(args, "--permission-prompt-tool", opt.PermissionTool)
@@ -88,17 +73,14 @@ func Run(ctx context.Context, opt Options, onEvent func(Event)) (Result, error) 
 	if len(opt.DisallowedTools) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(opt.DisallowedTools, ","))
 	}
-	if opt.SystemPromptAppend != "" {
-		args = append(args, "--append-system-prompt", opt.SystemPromptAppend)
+	if opt.SystemPrompt != "" {
+		args = append(args, "--append-system-prompt", opt.SystemPrompt)
 	}
 	if opt.Model != "" {
 		args = append(args, "--model", opt.Model)
 	}
 
-	bin := opt.ClaudeBin
-	if bin == "" {
-		bin = "claude"
-	}
+	bin := a.Bin
 	// Detached from ctx on purpose: we do the SIGINT/SIGKILL dance ourselves.
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = opt.Dir
@@ -107,20 +89,20 @@ func Run(ctx context.Context, opt Options, onEvent func(Event)) (Result, error) 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return Result{}, err
+		return agent.Result{}, err
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &limitedWriter{w: &stderr, n: 64 << 10}
 
 	if err := cmd.Start(); err != nil {
-		return Result{}, fmt.Errorf("runner: start %s: %w", bin, err)
+		return agent.Result{}, fmt.Errorf("claude: start %s: %w", bin, err)
 	}
 
 	killed := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			grace := opt.KillGrace
+			grace := a.KillGrace
 			if grace <= 0 {
 				grace = 5 * time.Second
 			}
@@ -138,7 +120,7 @@ func Run(ctx context.Context, opt Options, onEvent func(Event)) (Result, error) 
 	waitErr := cmd.Wait()
 	close(killed)
 
-	res := Result{
+	res := agent.Result{
 		SessionID:  st.sessionID,
 		Text:       st.finalText(),
 		Turns:      st.turns,
@@ -147,17 +129,17 @@ func Run(ctx context.Context, opt Options, onEvent func(Event)) (Result, error) 
 	}
 	switch {
 	case ctx.Err() != nil:
-		res.Status = StatusCancelled
+		res.Status = agent.StatusCancelled
 		res.ErrCode = "cancelled"
 		res.ErrMessage = ctx.Err().Error()
 	case st.sawResult && !st.isError:
-		res.Status = StatusSucceeded
+		res.Status = agent.StatusSucceeded
 	case st.sawResult:
-		res.Status = StatusFailed
+		res.Status = agent.StatusFailed
 		res.ErrCode = st.subtype
 		res.ErrMessage = st.resultText
 	default:
-		res.Status = StatusFailed
+		res.Status = agent.StatusFailed
 		res.ErrCode = "claude_exit"
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" && waitErr != nil {
@@ -214,13 +196,13 @@ type line struct {
 	DurationMS int64   `json:"duration_ms"`
 }
 
-func parse(r io.Reader, onEvent func(Event)) *streamState {
+func parse(r io.Reader, onEvent func(agent.Event)) *streamState {
 	st := &streamState{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), 32<<20)
 	emit := func() {
 		if onEvent != nil {
-			onEvent(Event{SessionID: st.sessionID, Text: st.snapshot(), CurrentTool: st.tool, Turns: st.turns})
+			onEvent(agent.Event{SessionID: st.sessionID, Text: st.snapshot(), CurrentTool: st.tool, Turns: st.turns})
 		}
 	}
 	for sc.Scan() {
@@ -284,15 +266,4 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	return len(p), err
 }
 
-var ErrNoClaude = errors.New("runner: claude binary not found")
-
-// Check verifies the claude binary is runnable.
-func Check(bin string) error {
-	if bin == "" {
-		bin = "claude"
-	}
-	if _, err := exec.LookPath(bin); err != nil {
-		return fmt.Errorf("%w: %v", ErrNoClaude, err)
-	}
-	return nil
-}
+var ErrNoClaude = errors.New("claude: binary not found")

@@ -184,6 +184,7 @@ func (c *Core) createJob(ctx context.Context, p *model.Post, text string) {
 		return
 	}
 	workspace, prompt := splitWorkspace(text)
+	agentName, prompt := splitAgent(prompt)
 	if strings.TrimSpace(prompt) == "" {
 		c.reply(ctx, p, "Tell me what to do after the mention.")
 		return
@@ -194,6 +195,7 @@ func (c *Core) createJob(ctx context.Context, p *model.Post, text string) {
 		return
 	}
 	attachments := c.downloadAttachments(ctx, p)
+	history := c.threadHistory(ctx, p, root)
 
 	online := c.hub.Online(harness.ID)
 	now := c.now()
@@ -222,10 +224,12 @@ func (c *Core) createJob(ctx context.Context, p *model.Post, text string) {
 	}
 	env, err := protocol.New(protocol.TypeJobDispatch, job.ID, protocol.JobDispatch{
 		Workspace:   workspace,
+		Agent:       agentName,
 		Prompt:      prompt,
 		Thread:      protocol.Thread{ChannelID: p.ChannelId, RootPostID: root, TriggerPostID: p.Id},
 		Requester:   protocol.Requester{MMUserID: user.Id, Username: user.Username},
 		Attachments: attachments,
+		History:     history,
 		Limits:      protocol.Limits{MaxTurns: c.cfg.DefaultMaxTurns, TimeoutMS: int(c.cfg.JobTimeout / time.Millisecond)},
 	})
 	if err == nil {
@@ -236,8 +240,8 @@ func (c *Core) createJob(ctx context.Context, p *model.Post, text string) {
 		c.fail(ctx, job, "dispatch failed: "+err.Error())
 		return
 	}
-	c.audit(ctx, p.UserId, "job.created", job.ID, map[string]any{"harness": harness.ID, "workspace": workspace, "queued": !online})
-	c.log.Info("job created", "job", job.ID, "user", user.Username, "harness", harness.ID, "workspace", workspace, "queued", !online)
+	c.audit(ctx, p.UserId, "job.created", job.ID, map[string]any{"harness": harness.ID, "workspace": workspace, "agent": agentName, "history": len(history), "queued": !online})
+	c.log.Info("job created", "job", job.ID, "user", user.Username, "harness", harness.ID, "workspace", workspace, "agent", agentName, "history", len(history), "queued", !online)
 }
 
 // pickHarness: the user's most recently seen harness. One per user is the
@@ -258,6 +262,47 @@ func (c *Core) pickHarness(ctx context.Context, userID string) (store.Harness, b
 		}
 	}
 	return best, true
+}
+
+// MaxHistoryPosts bounds the thread transcript sent with a dispatch.
+const MaxHistoryPosts = 60
+
+// threadHistory collects the thread's earlier posts for a mention inside an
+// existing thread: everything before the trigger except the bot's own
+// status and approval posts. The harness uses it only for a thread it has
+// no session for yet.
+func (c *Core) threadHistory(ctx context.Context, trigger *model.Post, root string) []protocol.HistoryPost {
+	if trigger.RootId == "" {
+		return nil // a fresh thread: the trigger is the whole conversation
+	}
+	posts, err := c.mm.GetThread(ctx, root)
+	if err != nil {
+		c.log.Warn("thread history", "root", root, "err", err)
+		return nil
+	}
+	names := map[string]string{}
+	var out []protocol.HistoryPost
+	for _, p := range posts {
+		if p.Id == trigger.Id || p.UserId == c.cfg.BotUserID || p.GetProp(model.PostPropsFromBot) != nil || p.Type != "" {
+			continue
+		}
+		if p.CreateAt >= trigger.CreateAt && trigger.CreateAt > 0 {
+			continue
+		}
+		name, ok := names[p.UserId]
+		if !ok {
+			name = p.UserId
+			if u, err := c.mm.GetUser(ctx, p.UserId); err == nil {
+				name = u.Username
+			}
+			names[p.UserId] = name
+		}
+		out = append(out, protocol.HistoryPost{Username: name, At: p.CreateAt, Text: stripMention(p.Message, c.cfg.BotUsername)})
+	}
+	if len(out) > MaxHistoryPosts {
+		out = out[len(out)-MaxHistoryPosts:]
+	}
+	return out
 }
 
 func (c *Core) downloadAttachments(ctx context.Context, p *model.Post) []protocol.File {
@@ -819,6 +864,20 @@ func splitWorkspace(text string) (string, string) {
 	return "", strings.TrimSpace(text)
 }
 
+// splitAgent pulls the first "agent:<name>" token out of the prompt.
+func splitAgent(text string) (string, string) {
+	fields := strings.Fields(text)
+	for i, f := range fields {
+		f = strings.Trim(f, "`\"'.,;:")
+		if !strings.HasPrefix(f, "agent:") || len(f) == len("agent:") {
+			continue
+		}
+		rest := append(append([]string{}, fields[:i]...), fields[i+1:]...)
+		return strings.ToLower(f[len("agent:"):]), strings.Join(rest, " ")
+	}
+	return "", strings.TrimSpace(text)
+}
+
 func renderProgress(harnessName string, p protocol.JobProgress) string {
 	head := fmt.Sprintf("▶️ Running on `%s` · %d turns", harnessName, p.Turns)
 	if p.Phase == protocol.PhaseAwaitingApproval {
@@ -854,7 +913,8 @@ func truncate(s string, n int) string {
 
 func helpText(bot string) string {
 	return "Mention me with a task in any channel or thread, e.g. `@" + bot + " ws:infra bump the mattermost provider`.\n" +
-		"- `ws:<name>` picks a workspace configured on your harness; without it the thread's previous workspace or your only workspace is used.\n" +
+		"- `ws:<name>` picks a workspace configured on your harness; without it the thread's previous workspace or the harness's default folder is used.\n" +
+		"- `agent:claude` or `agent:codex` picks the coding agent; without it the thread's previous agent or the harness's default is used.\n" +
 		"- Reply in the same thread to continue the conversation.\n" +
 		"- `@" + bot + " cancel` stops the running job in a thread.\n" +
 		"- Direct messages: `pair` (new harness code), `status`."

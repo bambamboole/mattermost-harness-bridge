@@ -28,6 +28,7 @@ func newHarnessCmd() *cobra.Command {
 
 func newHarnessRunCmd() *cobra.Command {
 	var debug bool
+	var defaultWorkspace, agentName string
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Start the harness daemon",
@@ -40,6 +41,17 @@ func newHarnessRunCmd() *cobra.Command {
 			log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 			cfg, err := harness.LoadConfig()
 			if err != nil {
+				return err
+			}
+			if defaultWorkspace != "" {
+				if cfg.DefaultWorkspace, err = filepath.Abs(defaultWorkspace); err != nil {
+					return err
+				}
+			}
+			if agentName != "" {
+				cfg.Agent = agentName
+			}
+			if err := cfg.Validate(); err != nil {
 				return err
 			}
 			h, err := harness.New(cfg, log)
@@ -56,6 +68,8 @@ func newHarnessRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&debug, "debug", false, "verbose logging")
+	cmd.Flags().StringVar(&defaultWorkspace, "default-workspace", "", "directory for jobs that name no workspace (default: default_workspace in the config, ~/.harness)")
+	cmd.Flags().StringVar(&agentName, "agent", "", "coding agent for jobs that name none: claude or codex (default: agent in the config)")
 	return cmd
 }
 
