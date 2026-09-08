@@ -115,25 +115,43 @@ type OutboxMessage struct {
 
 // Bot is a user's own bot account, created by /harness init.
 type Bot struct {
-	UserID    string // the bot's Mattermost user id
-	MMUserID  string // the owner
-	Username  string
-	Token     string // posts as the bot
-	CreatedAt time.Time
+	UserID         string // the bot's Mattermost user id
+	MMUserID       string // the owner
+	Username       string
+	Token          string // posts as the bot
+	CreatedAt      time.Time
+	HarnessID      string // exactly one local harness; an owner may have many bots
+	TeamID         string
+	ChannelID      string // default incoming webhook channel
+	IncomingHookID string
+	OutgoingHookID string
+	OutgoingToken  string
+}
+
+// Installation stores an OAuth-authorized team and its managed slash command.
+// Credentials is encrypted by the OAuth service before persistence.
+type Installation struct {
+	TeamID       string
+	UserID       string
+	Credentials  string
+	CommandID    string
+	CommandToken string
 }
 
 // InitRequest is one device-flow onboarding: created by the laptop with a
 // code, claimed by the owner in Mattermost, fetched once by the laptop.
 type InitRequest struct {
-	CodeHash     string
-	BotName      string // requested bot username, "" for the default
-	HarnessName  string
-	CreatedAt    time.Time
-	ExpiresAt    time.Time
-	ClaimedAt    *time.Time
-	HarnessID    string
-	HarnessToken string // plaintext until fetched
-	FetchedAt    *time.Time
+	CodeHash      string
+	BotName       string // requested bot username, "" for the default
+	HarnessName   string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	ClaimedAt     *time.Time
+	HarnessID     string
+	HarnessToken  string // plaintext until fetched
+	FetchedAt     *time.Time
+	BotUserID     string
+	PollTokenHash string
 }
 
 func (r InitRequest) Claimed() bool { return r.ClaimedAt != nil }
@@ -147,11 +165,13 @@ type AuditEntry struct {
 }
 
 type JobFilter struct {
-	MMUserID   string
-	HarnessID  string
-	RootPostID string
-	States     []JobState
-	Limit      int
+	BotUserID     string
+	TriggerPostID string
+	MMUserID      string
+	HarnessID     string
+	RootPostID    string
+	States        []JobState
+	Limit         int
 }
 
 type HarnessStore interface {
@@ -205,6 +225,16 @@ type BotStore interface {
 	BotByOwner(ctx context.Context, mmUserID string) (Bot, error)
 	BotByUserID(ctx context.Context, botUserID string) (Bot, error)
 	ListBots(ctx context.Context) ([]Bot, error)
+	BotsByOwner(ctx context.Context, mmUserID string) ([]Bot, error)
+	BotByUsername(ctx context.Context, username string) (Bot, error)
+	UpdateBot(ctx context.Context, b Bot) error
+	DeleteBot(ctx context.Context, botUserID string) error
+}
+
+type InstallationStore interface {
+	SaveInstallation(ctx context.Context, i Installation) error
+	InstallationByTeam(ctx context.Context, teamID string) (Installation, error)
+	ListInstallations(ctx context.Context) ([]Installation, error)
 }
 
 type InitStore interface {
@@ -219,6 +249,8 @@ type InitStore interface {
 	// if unknown or expired.
 	FetchInit(ctx context.Context, codeHash string, now time.Time) (InitRequest, error)
 	InitByHarness(ctx context.Context, harnessID string) (InitRequest, error)
+	// CompleteInit atomically creates the harness, binds its bot and consumes the code.
+	CompleteInit(ctx context.Context, codeHash string, now time.Time, h Harness, botUserID, token string) error
 }
 
 type AuditStore interface {
@@ -234,5 +266,6 @@ type Store interface {
 	BotStore
 	InitStore
 	AuditStore
+	InstallationStore
 	Close() error
 }

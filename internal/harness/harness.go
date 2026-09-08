@@ -54,6 +54,7 @@ type Harness struct {
 type job struct {
 	id         string
 	rootPostID string
+	botUserID  string
 	workspace  string
 	dir        string
 	agent      string
@@ -194,12 +195,15 @@ func (h *Harness) OnDispatch(ctx context.Context, jobID string, d protocol.JobDi
 		h.log.Error("dispatch from non-owner refused", "job", jobID, "requester", d.Requester.MMUserID)
 		return protocol.Ack{OK: false, Code: protocol.NackForbidden, Message: "requester is not the harness owner"}
 	}
+	if d.BotUserID == "" || d.Thread.RootPostID == "" {
+		return protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: "bot_user_id and root_post_id are required"}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if _, exists := h.jobs[jobID]; exists {
 		return protocol.Ack{OK: true} // resend of a dispatch we already run
 	}
-	session, hasSession := h.sessions.Get(d.Thread.RootPostID)
+	session, hasSession := h.sessions.Get(d.BotUserID, d.Thread.RootPostID)
 	wsName, wsDir, ok := h.resolveWorkspace(d, session, hasSession)
 	if !ok {
 		return protocol.Ack{OK: false, Code: protocol.NackWorkspaceUnknown,
@@ -220,7 +224,7 @@ func (h *Harness) OnDispatch(ctx context.Context, jobID string, d protocol.JobDi
 		jctx, cancel = context.WithTimeout(context.Background(), time.Duration(d.Limits.TimeoutMS)*time.Millisecond)
 	}
 	j := &job{
-		id: jobID, rootPostID: d.Thread.RootPostID, workspace: wsName, dir: wsDir, agent: agentName, cancel: cancel,
+		id: jobID, botUserID: d.BotUserID, rootPostID: d.Thread.RootPostID, workspace: wsName, dir: wsDir, agent: agentName, cancel: cancel,
 		phase: protocol.PhaseStarting, approvals: map[string]chan protocol.ApprovalResponse{},
 	}
 	h.jobs[jobID] = j
@@ -302,7 +306,7 @@ func (h *Harness) run(ctx context.Context, j *job, d protocol.JobDispatch) {
 
 	// Continue the thread's session only on the same agent in the same
 	// workspace; otherwise start fresh and hand the agent the thread so far.
-	if e, ok := h.sessions.Get(j.rootPostID); ok && e.Workspace == j.workspace && e.Agent == j.agent {
+	if e, ok := h.sessions.Get(j.botUserID, j.rootPostID); ok && e.Workspace == j.workspace && e.Agent == j.agent {
 		opt.ResumeID = e.SessionID
 	}
 	prompt := d.Prompt
@@ -359,7 +363,7 @@ func (h *Harness) run(ctx context.Context, j *job, d protocol.JobDispatch) {
 		res = agent.Result{Status: agent.StatusFailed, ErrCode: "harness", ErrMessage: err.Error()}
 	}
 	if res.SessionID != "" {
-		if err := h.sessions.Put(j.rootPostID, res.SessionID, j.workspace, j.agent); err != nil {
+		if err := h.sessions.Put(j.botUserID, j.rootPostID, res.SessionID, j.workspace, j.agent); err != nil {
 			h.log.Error("save session", "err", err)
 		}
 	}

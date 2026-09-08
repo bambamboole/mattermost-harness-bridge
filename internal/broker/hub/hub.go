@@ -68,7 +68,7 @@ func TokenHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ServeHTTP upgrades /harness/v1 requests.
+// ServeHTTP upgrades requests to the current protocol.Path endpoint.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {

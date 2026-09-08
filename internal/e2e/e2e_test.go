@@ -140,8 +140,8 @@ func newWorld(t *testing.T) *world {
 	h := hub.New(st, nil, log)
 	h.HeartbeatInterval = 200 * time.Millisecond
 	h.ReadTimeout = 2 * time.Second
-	c := core.New(core.Config{BotUserID: botID, BotUsername: "cc", PublicURL: "https://broker.test",
-		CallbackSecret: []byte("0123456789abcdef0123456789abcdef"), EditInterval: 10 * time.Millisecond}, st, mm, h, log)
+	c := core.New(core.Config{PublicURL: "https://broker.test",
+		CallbackSecret: []byte("0123456789abcdef0123456789abcdef"), EditInterval: 10 * time.Millisecond}, st, nil, h, log).WithOnboarding(nil, func(token string) mattermost.API { return mm.WithToken(token) })
 	h.Handler = c
 	mux := http.NewServeMux()
 	mux.Handle(protocol.Path, h)
@@ -151,6 +151,9 @@ func newWorld(t *testing.T) *world {
 	token := "hrt_test"
 	hrn := store.Harness{ID: "hrn_1", MMUserID: ownerID, Name: "mbp", TokenHash: hub.TokenHash(token), CreatedAt: time.Now()}
 	if err := st.CreateHarness(ctx, hrn); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateBot(ctx, store.Bot{UserID: botID, MMUserID: ownerID, Username: "cc", Token: "bot_token", HarnessID: hrn.ID, CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,7 +209,7 @@ func (w *world) wait(what string, cond func() bool) {
 
 func (w *world) mention(msg, root string) *model.Post {
 	p := &model.Post{Id: protocol.NewID("trig"), ChannelId: "chan", UserId: ownerID, Message: msg, RootId: root}
-	w.core.HandlePost(w.ctx, mattermost.PostedEvent{Post: p, ChannelType: "O", Mentions: []string{botID}})
+	w.core.HandleBotPost(w.ctx, botID, mattermost.PostedEvent{Post: p, ChannelType: "O", Mentions: nil})
 	return p
 }
 
@@ -255,6 +258,9 @@ func TestFullFlowWithApprovalAndThreadContinuation(t *testing.T) {
 	// 1. Mention -> job runs in the workspace and asks for approval.
 	trigger := w.mention("@cc ws:ws please ask before deleting", "")
 	job := w.jobFor(trigger.Id)
+	if job.BotUserID != botID || w.mm.PostToken(job.StatusPostID) != "bot_token" {
+		t.Fatalf("job did not use provisioned bot: %+v", job)
+	}
 	w.waitState(job.ID, store.JobAwaitingApproval)
 	btn := w.buttonPost()
 	if att := w.mm.Attachments(btn.Id); !strings.Contains(att[0].Text, "rm -rf node_modules") {
@@ -272,7 +278,7 @@ func TestFullFlowWithApprovalAndThreadContinuation(t *testing.T) {
 	w.wait("final post", func() bool { return strings.Contains(w.mm.Message(job.StatusPostID), "Done") })
 
 	// 3. Reply in the same thread -> resumed session, same workspace without ws: prefix.
-	w.mention("@cc and now deny me, ask again", trigger.Id)
+	w.mention("and now deny me, ask again", trigger.Id)
 	job2 := w.jobFor(trigger.Id)
 	if job2.ID == job.ID {
 		t.Fatal("no second job")

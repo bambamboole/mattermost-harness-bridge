@@ -15,6 +15,7 @@ import (
 // InitStart mirrors the broker's response to POST /init.
 type InitStart struct {
 	Code      string    `json:"code"`
+	PollToken string    `json:"poll_token"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Command   string    `json:"command"`
 }
@@ -30,7 +31,7 @@ type InitResult struct {
 
 var (
 	ErrInitExpired  = errors.New("the init code expired before it was claimed")
-	ErrInitDisabled = errors.New("the broker has onboarding disabled; ask the admin for MM_ADMIN_TOKEN")
+	ErrInitDisabled = errors.New("the broker has onboarding disabled; ask the admin to complete the OAuth installation")
 )
 
 // StartInit asks the broker for a device-flow code.
@@ -63,7 +64,7 @@ func StartInit(ctx context.Context, brokerURL, botName, harnessName string) (Ini
 
 // WaitInit polls until the owner claimed the code, the code expired, or ctx
 // ended. onTick is called between polls for a progress indicator.
-func WaitInit(ctx context.Context, brokerURL, code string, expiresAt time.Time, onTick func()) (InitResult, error) {
+func WaitInit(ctx context.Context, brokerURL, code, pollToken string, expiresAt time.Time, onTick func()) (InitResult, error) {
 	client := &http.Client{Timeout: 20 * time.Second}
 	url := strings.TrimRight(brokerURL, "/") + "/init/" + code
 	for {
@@ -71,6 +72,7 @@ func WaitInit(ctx context.Context, brokerURL, code string, expiresAt time.Time, 
 		if err != nil {
 			return InitResult{}, err
 		}
+		req.Header.Set("Authorization", "Bearer "+pollToken)
 		res, err := client.Do(req)
 		if err != nil {
 			return InitResult{}, err

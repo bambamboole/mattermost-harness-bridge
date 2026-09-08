@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"regexp"
@@ -10,15 +11,10 @@ import (
 
 	"github.com/mattermost/mattermost/server/public/model"
 
+	"github.com/bambamboole/mattermost-harness-bridge/internal/broker/mattermost"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/protocol"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/store"
 )
-
-// Onboarding is a device flow: `mhb harness init` asks the broker for a
-// code and polls; the owner types `/harness init <code>` in Mattermost,
-// which is authenticated by the slash command's token and carries the
-// user's id. The broker then creates the owner's bot with the admin token,
-// issues the harness token, and the poll hands it to the laptop once.
 
 const (
 	InitCodeTTL      = 10 * time.Minute
@@ -28,21 +24,26 @@ const (
 )
 
 var (
-	ErrInitDisabled  = errors.New("onboarding is disabled: the broker has no admin token")
+	ErrInitDisabled  = errors.New("onboarding is unavailable; ask an administrator to install the Mattermost integration")
 	ErrInitUnknown   = errors.New("unknown or expired init code")
 	ErrInitPending   = errors.New("init code not claimed yet")
 	ErrInitConsumed  = errors.New("init result was already fetched")
 	botUsernameRegex = regexp.MustCompile(`^[a-z][a-z0-9._-]{2,21}$`)
 )
 
-// InitStart is what the laptop receives when it asks for a code.
-type InitStart struct {
-	Code      string    `json:"code"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Command   string    `json:"command"` // what to type in Mattermost
+// WithProvisioner resolves the OAuth installation for each verified command's team.
+func (c *Core) WithProvisioner(provider func(context.Context, string) (mattermost.Provisioner, error), factory func(string) mattermost.API) *Core {
+	c.provisioner = provider
+	c.newPoster = factory
+	return c
 }
 
-// InitResult is what the laptop receives once the owner claimed the code.
+type InitStart struct {
+	Code      string    `json:"code"`
+	PollToken string    `json:"poll_token"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Command   string    `json:"command"`
+}
 type InitResult struct {
 	HarnessID   string `json:"harness_id"`
 	Token       string `json:"token"`
@@ -51,28 +52,36 @@ type InitResult struct {
 	BotUsername string `json:"bot_username"`
 }
 
-// StartInit creates a code for the laptop. botName may be "" for the default.
 func (c *Core) StartInit(ctx context.Context, botName, harnessName string) (InitStart, error) {
-	if c.admin == nil {
+	if c.provisioner == nil {
 		return InitStart{}, ErrInitDisabled
 	}
-	botName = strings.TrimSpace(strings.ToLower(botName))
+	botName = strings.ToLower(strings.TrimSpace(botName))
 	if botName != "" && !botUsernameRegex.MatchString(botName) {
-		return InitStart{}, fmt.Errorf("bot name %q: 3-22 chars, lowercase letters, digits, . _ -, starting with a letter", botName)
+		return InitStart{}, errors.New("bot name must be 3-22 lowercase letters, digits, . _ or -, starting with a letter")
 	}
-	code := randomCode(InitCodeLength)
+	code, pollToken := randomCode(InitCodeLength), randomToken(32)
 	now := c.now()
-	exp := now.Add(InitCodeTTL)
-	err := c.st.CreateInit(ctx, store.InitRequest{CodeHash: hashCode(code), BotName: botName, HarnessName: harnessName, CreatedAt: now, ExpiresAt: exp})
-	if err != nil {
+	expires := now.Add(InitCodeTTL)
+	if err := c.st.CreateInit(ctx, store.InitRequest{CodeHash: hashCode(code), PollTokenHash: tokenHash(pollToken), BotName: botName, HarnessName: harnessName, CreatedAt: now, ExpiresAt: expires}); err != nil {
 		return InitStart{}, err
 	}
-	return InitStart{Code: code, ExpiresAt: exp, Command: "/harness init " + code}, nil
+	return InitStart{Code: code, PollToken: pollToken, ExpiresAt: expires, Command: "/harness init " + code}, nil
 }
 
-// PollInit returns ErrInitPending until the owner claimed the code, then the
-// result exactly once.
-func (c *Core) PollInit(ctx context.Context, code string) (InitResult, error) {
+// PollInit requires the laptop's secret as well as the publicly typed code.
+// Authenticate before FetchInit, which consumes a successful result exactly once.
+func (c *Core) PollInit(ctx context.Context, code, pollToken string) (InitResult, error) {
+	req, err := c.st.InitByCode(ctx, hashCode(code))
+	if errors.Is(err, store.ErrNotFound) {
+		return InitResult{}, ErrInitUnknown
+	}
+	if err != nil {
+		return InitResult{}, err
+	}
+	if pollToken == "" || req.PollTokenHash == "" || subtle.ConstantTimeCompare([]byte(tokenHash(pollToken)), []byte(req.PollTokenHash)) != 1 {
+		return InitResult{}, ErrInitUnknown
+	}
 	r, err := c.st.FetchInit(ctx, hashCode(code), c.now())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -88,17 +97,18 @@ func (c *Core) PollInit(ctx context.Context, code string) (InitResult, error) {
 	if err != nil {
 		return InitResult{}, err
 	}
-	res := InitResult{HarnessID: h.ID, Token: r.HarnessToken, MMUserID: h.MMUserID}
-	if u, err := c.mm.GetUser(ctx, h.MMUserID); err == nil {
-		res.Username = u.Username
+	result := InitResult{HarnessID: h.ID, Token: r.HarnessToken, MMUserID: h.MMUserID}
+	if bot, err := c.st.BotByUserID(ctx, r.BotUserID); err == nil {
+		result.BotUsername = bot.Username
+		if p, err := c.installation(ctx, bot.TeamID); err == nil {
+			if user, err := p.GetUser(ctx, h.MMUserID); err == nil && user != nil {
+				result.Username = user.Username
+			}
+		}
 	}
-	if b, err := c.st.BotByOwner(ctx, h.MMUserID); err == nil {
-		res.BotUsername = b.Username
-	}
-	return res, nil
+	return result, nil
 }
 
-// CommandRequest is the form Mattermost posts for a slash command.
 type CommandRequest struct {
 	Token     string
 	UserID    string
@@ -106,164 +116,272 @@ type CommandRequest struct {
 	ChannelID string
 	TeamID    string
 	RootID    string
-	Text      string // everything after the trigger word
+	Text      string
 }
 
-// HandleCommand serves the /harness slash command. The caller has verified
-// the command token.
+// HandleCommand trusts only identity carried by the verified team slash command.
 func (c *Core) HandleCommand(ctx context.Context, args CommandRequest) *model.CommandResponse {
 	fields := strings.Fields(args.Text)
-	sub := ""
-	if len(fields) > 0 {
-		sub = strings.ToLower(fields[0])
-	}
 	ephemeral := func(text string) *model.CommandResponse {
 		return &model.CommandResponse{ResponseType: model.CommandResponseTypeEphemeral, Text: text}
 	}
-	switch sub {
-	case "init":
-		if len(fields) < 2 {
-			return ephemeral("Usage: `/harness init <code>` with the code shown by `mhb harness init` on your machine.")
-		}
-		text, err := c.claimInit(ctx, args, fields[1])
-		if err != nil {
-			c.log.Warn("harness init", "user", args.UserID, "err", err)
-			return ephemeral("Init failed: " + err.Error())
-		}
-		return ephemeral(text)
-	case "join":
-		text, err := c.joinChannel(ctx, args)
-		if err != nil {
-			return ephemeral("Join failed: " + err.Error())
-		}
-		return ephemeral(text)
-	case "status":
-		return ephemeral(c.statusText(ctx, args.UserID))
-	default:
-		return ephemeral("Commands: `/harness init <code>` (pair this machine, creates your bot), `/harness join` (bring your bot into this channel), `/harness status`.")
+	if len(fields) == 0 {
+		return ephemeral(commandHelp)
 	}
+	var text string
+	var err error
+	switch strings.ToLower(fields[0]) {
+	case "init":
+		if len(fields) == 1 {
+			return ephemeral("Run `mhb harness init --broker " + c.cfg.PublicURL + "` on the machine that will run your coding agents. Then paste its `/harness init <code>` command here. Add a bot name with `/harness init <code> <bot-name>`.")
+		}
+		if len(fields) > 3 {
+			return ephemeral("Usage: `/harness init <code> [bot-name]`.")
+		}
+		name := ""
+		if len(fields) == 3 {
+			name = fields[2]
+		}
+		text, err = c.claimInit(ctx, args, fields[1], name)
+	case "bot":
+		if len(fields) != 4 || strings.ToLower(fields[1]) != "create" {
+			return ephemeral("Usage: `/harness bot create <name> <harness-id>`.")
+		}
+		text, err = c.createBoundBot(ctx, args, fields[2], fields[3])
+	case "join":
+		if len(fields) != 2 {
+			return ephemeral("Usage: `/harness join <bot-name>`.")
+		}
+		text, err = c.joinChannel(ctx, args, fields[1])
+	case "status":
+		return ephemeral(c.onboardingStatusText(ctx, args.UserID))
+	default:
+		return ephemeral(commandHelp)
+	}
+	if err != nil {
+		return ephemeral("Command failed: " + err.Error())
+	}
+	return ephemeral(text)
 }
 
-// claimInit binds a pending code to the calling user: bot (created on first
-// init), memberships, harness token.
-func (c *Core) claimInit(ctx context.Context, args CommandRequest, code string) (string, error) {
-	if c.admin == nil {
-		return "", ErrInitDisabled
+const commandHelp = "Commands: `/harness init <code> [bot-name]` pairs a machine and creates a bot; `/harness bot create <name> <harness-id>` adds a bot; `/harness join <bot-name>` brings it into this channel; `/harness status` lists your bots and harnesses. Start pairing with `mhb harness init` on your machine."
+
+func (c *Core) installation(ctx context.Context, teamID string) (mattermost.Provisioner, error) {
+	if c.provisioner == nil || teamID == "" {
+		return nil, ErrInitDisabled
 	}
-	now := c.now()
+	p, err := c.provisioner(ctx, teamID)
+	if err != nil || p == nil {
+		return nil, ErrInitDisabled
+	}
+	return p, nil
+}
+func (c *Core) claimInit(ctx context.Context, args CommandRequest, code, requested string) (string, error) {
+	c.onboardingMu.Lock()
+	defer c.onboardingMu.Unlock()
 	req, err := c.st.InitByCode(ctx, hashCode(code))
-	if errors.Is(err, store.ErrNotFound) || (err == nil && !req.ExpiresAt.After(now)) {
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !req.ExpiresAt.After(c.now())) {
 		return "", ErrInitUnknown
 	}
 	if err != nil {
-		return "", err
+		return "", errors.New("could not read pairing request")
 	}
 	if req.Claimed() {
 		return "", errors.New("this code was already used")
 	}
-	user, err := c.mm.GetUser(ctx, args.UserID)
+	p, err := c.installation(ctx, args.TeamID)
 	if err != nil {
 		return "", err
 	}
-	bot, created, err := c.ensureBot(ctx, user, req.BotName)
+	if requested == "" {
+		requested = req.BotName
+	}
+	bot, err := c.provisionBot(ctx, p, args, requested, "")
 	if err != nil {
 		return "", err
 	}
-	joined := c.addBotsToChannel(ctx, args, bot)
 	name := strings.TrimSpace(req.HarnessName)
 	if name == "" {
 		name = "harness"
 	}
 	token := "hrt_" + randomToken(32)
-	h := store.Harness{ID: protocol.NewID("hrn"), MMUserID: user.Id, Name: name, TokenHash: tokenHash(token), CreatedAt: now}
-	if err := c.st.CreateHarness(ctx, h); err != nil {
+	h := store.Harness{ID: protocol.NewID("hrn"), MMUserID: args.UserID, Name: name, TokenHash: tokenHash(token), CreatedAt: c.now()}
+	if err := c.st.CompleteInit(ctx, hashCode(code), c.now(), h, bot.UserID, token); err != nil {
+		c.rollbackBot(ctx, p, bot)
+		return "", errors.New("could not complete pairing; try again with a new bot name")
+	}
+	c.audit(ctx, args.UserID, "harness.init", "", map[string]any{"harness": h.ID, "bot": bot.Username})
+	return fmt.Sprintf("Paired `%s` (`%s`). Your bot @%s is ready in this channel. Mention it to run jobs on this machine. Use `/harness join %s` in another channel to add it there.", name, h.ID, bot.Username, bot.Username), nil
+}
+func (c *Core) createBoundBot(ctx context.Context, args CommandRequest, name, harnessID string) (string, error) {
+	c.onboardingMu.Lock()
+	defer c.onboardingMu.Unlock()
+	h, err := c.st.HarnessByID(ctx, harnessID)
+	if err != nil || h.MMUserID != args.UserID {
+		return "", errors.New("harness not found among your paired machines; use `/harness status`")
+	}
+	p, err := c.installation(ctx, args.TeamID)
+	if err != nil {
 		return "", err
 	}
-	if err := c.st.ClaimInit(ctx, hashCode(code), now, h.ID, token); err != nil {
+	bot, err := c.provisionBot(ctx, p, args, name, h.ID)
+	if err != nil {
 		return "", err
 	}
-	c.audit(ctx, user.Id, "harness.init", "", map[string]any{"harness": h.ID, "bot": bot.Username, "bot_created": created})
-	verb := "is ready"
-	if created {
-		verb = "was created"
-	}
-	where := "in this channel: mention it to run jobs on your machine. `/harness join` brings it into other channels."
-	if !joined {
-		where = "but bots cannot join direct or group messages: run `/harness join` in a channel, then mention it there."
-	}
-	return fmt.Sprintf("Paired `%s`. Your bot @%s %s %s", name, bot.Username, verb, where), nil
+	c.audit(ctx, args.UserID, "bot.created", "", map[string]any{"harness": h.ID, "bot": bot.Username})
+	return fmt.Sprintf("Created @%s, bound to `%s` (`%s`), in this channel.", bot.Username, h.Name, h.ID), nil
 }
 
-// addBotsToChannel adds the owner's bot and the shared listener bot to the
-// team and the channel the command was typed in. The listener must be
-// there because only its connection sees the mentions. Direct and group
-// messages take no bots; the owner is told to /harness join elsewhere.
-func (c *Core) addBotsToChannel(ctx context.Context, args CommandRequest, bot store.Bot) bool {
-	for _, id := range []string{bot.UserID, c.cfg.BotUserID} {
-		if args.TeamID != "" {
-			if err := c.admin.AddTeamMember(ctx, args.TeamID, id); err != nil {
-				c.log.Warn("add team member", "user", id, "err", err)
-			}
-		}
+// provisionBot persists only a complete account and pair of native hooks. Each
+// remote operation is compensated if any later operation fails.
+func (c *Core) provisionBot(ctx context.Context, p mattermost.Provisioner, args CommandRequest, requested, harnessID string) (bot store.Bot, err error) {
+	if args.UserID == "" {
+		return bot, errors.New("missing command owner")
 	}
-	if ch, err := c.admin.GetChannel(ctx, args.ChannelID); err == nil && (ch.Type == model.ChannelTypeDirect || ch.Type == model.ChannelTypeGroup) {
-		return false
+	channel, err := p.GetChannel(ctx, args.ChannelID)
+	if err != nil || channel == nil {
+		return bot, errors.New("could not read this channel")
 	}
-	ok := true
-	for _, id := range []string{bot.UserID, c.cfg.BotUserID} {
-		if err := c.admin.AddChannelMember(ctx, args.ChannelID, id); err != nil {
-			c.log.Warn("add channel member", "user", id, "err", err)
-			ok = false
-		}
+	if channel.TeamId != args.TeamID || (channel.Type != model.ChannelTypeOpen && channel.Type != model.ChannelTypePrivate) {
+		return bot, errors.New("create bots in a public or private team channel")
 	}
-	return ok
-}
-
-// ensureBot returns the owner's bot, creating it on first init.
-func (c *Core) ensureBot(ctx context.Context, owner *model.User, requested string) (store.Bot, bool, error) {
-	if b, err := c.st.BotByOwner(ctx, owner.Id); err == nil {
-		return b, false, nil
+	owner, err := p.GetUser(ctx, args.UserID)
+	if err != nil || owner == nil {
+		return bot, errors.New("could not look up your Mattermost account")
 	}
-	username := requested
+	username := strings.ToLower(strings.TrimSpace(requested))
 	if username == "" {
-		username = defaultBotName(owner.Username)
+		base := defaultBotName(owner.Username)
+		if len(base) > maxBotNameLength-7 {
+			base = base[:maxBotNameLength-7]
+		}
+		username = strings.TrimRight(base, "._-") + "-" + randomToken(3)
 	}
 	if !botUsernameRegex.MatchString(username) {
-		return store.Bot{}, false, fmt.Errorf("bot name %q is not a valid Mattermost username", username)
+		return bot, errors.New("bot name must be 3-22 lowercase letters, digits, . _ or -, starting with a letter")
 	}
-	if _, err := c.admin.GetUserByUsername(ctx, username); err == nil {
-		return store.Bot{}, false, fmt.Errorf("the name @%s is taken; run `mhb harness init --bot <name>` with another one", username)
+	if _, lookupErr := c.st.BotByUsername(ctx, username); lookupErr == nil {
+		return bot, errors.New("that bot name is already taken; choose another name")
+	} else if !errors.Is(lookupErr, store.ErrNotFound) {
+		return bot, errors.New("could not check bot name")
 	}
-	mmBot, err := c.admin.CreateBot(ctx, username, owner.Username+"'s harness", "Runs coding-agent jobs on "+owner.Username+"'s machine through the mhb broker")
-	if err != nil {
-		return store.Bot{}, false, err
+	account, err := p.CreateBot(ctx, username, owner.Username+"'s harness", "Runs coding-agent jobs for "+owner.Username+" through the mhb broker")
+	if err != nil || account == nil || account.UserId == "" {
+		return bot, errors.New("could not create bot; check installation permissions and choose an unused bot name")
 	}
-	token, err := c.admin.CreateBotToken(ctx, mmBot.UserId, "mhb broker")
-	if err != nil {
-		return store.Bot{}, false, err
+	bot = store.Bot{UserID: account.UserId, MMUserID: args.UserID, Username: username, HarnessID: harnessID, TeamID: args.TeamID, ChannelID: args.ChannelID, CreatedAt: c.now()}
+	defer func() {
+		if err != nil {
+			c.rollbackBot(ctx, p, bot)
+		}
+	}()
+	if bot.Token, err = p.CreateBotToken(ctx, bot.UserID, "mhb broker"); err != nil || bot.Token == "" {
+		return bot, errors.New("could not create bot access token")
 	}
-	b := store.Bot{UserID: mmBot.UserId, MMUserID: owner.Id, Username: username, Token: token, CreatedAt: c.now()}
-	if err := c.st.CreateBot(ctx, b); err != nil {
-		return store.Bot{}, false, err
+	if err = p.AddTeamMember(ctx, args.TeamID, bot.UserID); err != nil {
+		return bot, errors.New("could not add bot to this team")
 	}
-	return b, true, nil
+	if err = p.AddChannelMember(ctx, args.ChannelID, bot.UserID); err != nil {
+		return bot, errors.New("could not add bot to this channel")
+	}
+	// An OAuth installer needs manage_others_incoming_webhooks to assign UserId.
+	incoming, err := p.CreateIncomingWebhook(ctx, &model.IncomingWebhook{UserId: bot.UserID, TeamId: args.TeamID, ChannelId: args.ChannelID, DisplayName: username, Username: username})
+	if incoming != nil {
+		bot.IncomingHookID = incoming.Id
+	}
+	if err != nil || incoming == nil || incoming.Id == "" || incoming.UserId != bot.UserID {
+		return bot, errors.New("could not create incoming webhook owned by the bot; check installation permissions")
+	}
+	// Team-wide trigger hooks cover public channels; the bot's WebSocket covers
+	// private channels and DMs. Mattermost rejects outgoing private-channel hooks.
+	outgoing, err := p.CreateOutgoingWebhook(ctx, &model.OutgoingWebhook{TeamId: args.TeamID, DisplayName: username, TriggerWords: model.StringArray{"@" + username}, CallbackURLs: model.StringArray{strings.TrimRight(c.cfg.PublicURL, "/") + "/webhooks/mattermost/" + bot.UserID}, ContentType: "application/x-www-form-urlencoded"})
+	if outgoing != nil {
+		bot.OutgoingHookID = outgoing.Id
+		bot.OutgoingToken = outgoing.Token
+	}
+	if err != nil || outgoing == nil || outgoing.Id == "" || outgoing.Token == "" {
+		return bot, errors.New("could not create outgoing webhook")
+	}
+	if err = c.st.CreateBot(ctx, bot); err != nil {
+		return bot, errors.New("could not save bot configuration")
+	}
+	return bot, nil
 }
 
-func (c *Core) joinChannel(ctx context.Context, args CommandRequest) (string, error) {
-	if c.admin == nil {
-		return "", ErrInitDisabled
+func (c *Core) rollbackBot(ctx context.Context, p mattermost.Provisioner, bot store.Bot) {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	clean := func(op string, err error) {
+		if err != nil {
+			c.log.Error("bot provisioning rollback failed", "operation", op, "bot", bot.UserID)
+		}
 	}
-	b, err := c.st.BotByOwner(ctx, args.UserID)
-	if err != nil {
-		return "", errors.New("you have no bot yet; run `mhb harness init` on your machine first")
+	if bot.OutgoingHookID != "" {
+		clean("delete outgoing webhook", p.DeleteOutgoingWebhook(cleanup, bot.OutgoingHookID))
 	}
-	if !c.addBotsToChannel(ctx, args, b) {
-		return "", errors.New("bots cannot join direct or group messages; use `/harness join` in a channel")
+	if bot.IncomingHookID != "" {
+		clean("delete incoming webhook", p.DeleteIncomingWebhook(cleanup, bot.IncomingHookID))
 	}
-	return "@" + b.Username + " is now in this channel.", nil
+	if bot.UserID != "" {
+		clean("disable bot", p.DisableBot(cleanup, bot.UserID))
+		if err := c.st.DeleteBot(cleanup, bot.UserID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			clean("delete bot configuration", err)
+		}
+	}
 }
 
-// defaultBotName derives "harness-<username>", trimmed to Mattermost's limit.
+func (c *Core) joinChannel(ctx context.Context, args CommandRequest, name string) (string, error) {
+	bot, err := c.st.BotByUsername(ctx, strings.TrimPrefix(strings.ToLower(name), "@"))
+	if err != nil || bot.MMUserID != args.UserID {
+		return "", errors.New("bot not found among your bots; use `/harness status`")
+	}
+	if bot.TeamID != args.TeamID {
+		return "", errors.New("use a channel in the bot's installed team")
+	}
+	p, err := c.installation(ctx, args.TeamID)
+	if err != nil {
+		return "", err
+	}
+	channel, err := p.GetChannel(ctx, args.ChannelID)
+	if err != nil || channel == nil {
+		return "", errors.New("could not read this channel")
+	}
+	if channel.TeamId != args.TeamID || (channel.Type != model.ChannelTypeOpen && channel.Type != model.ChannelTypePrivate) {
+		return "", errors.New("use `/harness join <bot-name>` in a public or private team channel")
+	}
+	if err = p.AddChannelMember(ctx, args.ChannelID, bot.UserID); err != nil {
+		return "", errors.New("could not add bot to this channel")
+	}
+	return "@" + bot.Username + " is now in this channel.", nil
+}
+func (c *Core) onboardingStatusText(ctx context.Context, userID string) string {
+	harnesses, err := c.st.HarnessesByUser(ctx, userID)
+	if err != nil {
+		return "Could not read your harnesses."
+	}
+	bots, err := c.st.BotsByOwner(ctx, userID)
+	if err != nil {
+		return "Could not read your bots."
+	}
+	if len(harnesses) == 0 {
+		return "No paired harness. Run `mhb harness init` on your machine, then paste the command here."
+	}
+	var text strings.Builder
+	for _, h := range harnesses {
+		state := "offline"
+		if c.hub.Online(h.ID) {
+			state = "online"
+		}
+		fmt.Fprintf(&text, "- `%s` (`%s`): %s", h.Name, h.ID, state)
+		for _, bot := range bots {
+			if bot.HarnessID == h.ID {
+				fmt.Fprintf(&text, " · @%s", bot.Username)
+			}
+		}
+		text.WriteByte('\n')
+	}
+	return text.String()
+}
 func defaultBotName(username string) string {
 	name := botNamePrefix + strings.ToLower(username)
 	if len(name) > maxBotNameLength {
