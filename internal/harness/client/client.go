@@ -43,6 +43,12 @@ type Client struct {
 	mu        sync.Mutex
 	conn      *wire.Conn
 	connected bool
+}
+
+// session is the per-connection state; a stale goroutine from a previous
+// connection never touches the current one.
+type session struct {
+	conn      *wire.Conn
 	heartbeat time.Duration
 	pongCh    chan struct{}
 }
@@ -117,14 +123,13 @@ func (c *Client) session(ctx context.Context) error {
 	if err := env.Decode(&welcome); err != nil {
 		return err
 	}
+	s := &session{conn: conn, heartbeat: time.Duration(welcome.HeartbeatIntervalMS) * time.Millisecond, pongCh: make(chan struct{}, 1)}
+	if s.heartbeat <= 0 {
+		s.heartbeat = 15 * time.Second
+	}
 	c.mu.Lock()
 	c.conn = conn
 	c.connected = true
-	c.heartbeat = time.Duration(welcome.HeartbeatIntervalMS) * time.Millisecond
-	if c.heartbeat <= 0 {
-		c.heartbeat = 15 * time.Second
-	}
-	c.pongCh = make(chan struct{}, 1)
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
@@ -143,15 +148,15 @@ func (c *Client) session(ctx context.Context) error {
 	}
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- c.heartbeatLoop(sctx, conn) }()
-	go func() { errCh <- c.readLoop(sctx, conn) }()
+	go func() { errCh <- c.heartbeatLoop(sctx, s) }()
+	go func() { errCh <- c.readLoop(sctx, s) }()
 	err = <-errCh
 	stop()
 	return err
 }
 
-func (c *Client) heartbeatLoop(ctx context.Context, conn *wire.Conn) error {
-	t := time.NewTicker(c.heartbeat)
+func (c *Client) heartbeatLoop(ctx context.Context, s *session) error {
+	t := time.NewTicker(s.heartbeat)
 	defer t.Stop()
 	for {
 		select {
@@ -160,13 +165,13 @@ func (c *Client) heartbeatLoop(ctx context.Context, conn *wire.Conn) error {
 		case <-t.C:
 		}
 		ping, _ := protocol.New(protocol.TypePing, "", protocol.Ping{Jobs: c.jobsForPing()})
-		if err := conn.Send(ctx, ping); err != nil {
+		if err := s.conn.Send(ctx, ping); err != nil {
 			return err
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-c.pongCh:
+		case <-s.pongCh:
 		case <-time.After(c.PongTimeout):
 			return errors.New("client: pong timeout")
 		}
@@ -180,22 +185,23 @@ func (c *Client) jobsForPing() int {
 	return len(c.Hello().Jobs)
 }
 
-func (c *Client) readLoop(ctx context.Context, conn *wire.Conn) error {
+func (c *Client) readLoop(ctx context.Context, s *session) error {
 	for {
-		env, err := conn.Recv(ctx)
+		env, err := s.conn.Recv(ctx)
 		if err != nil {
 			return err
 		}
-		c.handle(ctx, conn, env)
+		c.handle(ctx, s, env)
 	}
 }
 
-func (c *Client) handle(ctx context.Context, conn *wire.Conn, env protocol.Envelope) {
+func (c *Client) handle(ctx context.Context, s *session, env protocol.Envelope) {
+	conn := s.conn
 	var ack *protocol.Ack
 	switch env.Type {
 	case protocol.TypePong:
 		select {
-		case c.pongCh <- struct{}{}:
+		case s.pongCh <- struct{}{}:
 		default:
 		}
 		return

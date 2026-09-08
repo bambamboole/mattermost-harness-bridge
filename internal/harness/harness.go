@@ -81,7 +81,7 @@ func New(cfg Config, log *slog.Logger) (*Harness, error) {
 		Log:     log,
 	}
 	h.perm = &permission.Server{
-		Path:   filepath.Join(stateDir, "permission.sock"),
+		Path:   socketPath(stateDir),
 		Decide: h.decide,
 		Log:    func(f string, a ...any) { log.Warn(fmt.Sprintf(f, a...)) },
 	}
@@ -445,6 +445,16 @@ func (h *Harness) decide(ctx context.Context, req permission.Request) (permissio
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// socketPath keeps the Unix socket under the OS limit (104 bytes on macOS)
+// by falling back to the system temp dir for long state paths.
+func socketPath(stateDir string) string {
+	p := filepath.Join(stateDir, "permission.sock")
+	if len(p) < 100 {
+		return p
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("mmh-%d.sock", os.Getpid()))
+}
 
 func systemPrompt(d protocol.JobDispatch) string {
 	return "You are running headless, triggered from a Mattermost thread by " + d.Requester.Username + ". " +
