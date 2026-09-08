@@ -20,9 +20,8 @@ import (
 	"github.com/bambamboole/mattermost-harness-bridge/internal/harness/runner"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/harness/sessions"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/protocol"
+	"github.com/bambamboole/mattermost-harness-bridge/internal/version"
 )
-
-const Version = "0.1.0"
 
 // ProgressInterval is the minimum gap between two progress snapshots.
 const ProgressInterval = 700 * time.Millisecond
@@ -93,8 +92,8 @@ func (h *Harness) Run(ctx context.Context) error {
 	if err := h.perm.Start(); err != nil {
 		return err
 	}
-	defer h.perm.Close()
-	h.log.Info("harness starting", "version", Version, "broker", h.cfg.WSURL(), "workspaces", h.cfg.WorkspaceNames())
+	defer func() { _ = h.perm.Close() }()
+	h.log.Info("harness starting", "version", version.Version, "broker", h.cfg.WSURL(), "workspaces", h.cfg.WorkspaceNames())
 	return h.client.Run(ctx)
 }
 
@@ -105,7 +104,7 @@ func (h *Harness) hello() protocol.Hello {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	hello := protocol.Hello{
-		HarnessVersion: Version,
+		HarnessVersion: version.Version,
 		Hostname:       host,
 		Workspaces:     h.cfg.WorkspaceNames(),
 		MaxJobs:        h.cfg.MaxJobs,
@@ -219,7 +218,7 @@ func (h *Harness) run(ctx context.Context, j *job, dir string, d protocol.JobDis
 		h.finish(bctx, j, runner.Result{Status: runner.StatusFailed, ErrCode: "harness", ErrMessage: err.Error()}, start)
 		return
 	}
-	defer os.Remove(mcpPath)
+	defer func() { _ = os.Remove(mcpPath) }()
 
 	resume := ""
 	if e, ok := h.sessions.Get(j.rootPostID); ok && e.Workspace == j.workspace {
@@ -234,7 +233,7 @@ func (h *Harness) run(ctx context.Context, j *job, dir string, d protocol.JobDis
 		attDir := filepath.Join(h.stateDir, "jobs", j.id+".attachments")
 		names, err := writeAttachments(attDir, d.Attachments)
 		if err == nil {
-			defer os.RemoveAll(attDir)
+			defer func() { _ = os.RemoveAll(attDir) }()
 			prompt += "\n\nAttached files from the chat message: " + strings.Join(names, ", ")
 		} else {
 			h.log.Warn("attachments dropped", "job", j.id, "err", err)

@@ -18,7 +18,7 @@ func TestAskRoundTrip(t *testing.T) {
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -42,7 +42,7 @@ func TestDeciderErrorDenies(t *testing.T) {
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	dec, err := Ask(context.Background(), sock, Request{ToolName: "Bash"})
 	if err != nil || dec.Behavior != "deny" {
 		t.Fatalf("want deny, got %+v %v", dec, err)

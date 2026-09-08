@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: mattermost-harness-bridge
+
+before:
+  hooks:
+    - go test ./...
+
+env:
+  - CGO_ENABLED=0
+
+builds:
+  - id: broker
+    main: ./cmd/broker
+    binary: broker
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/bambamboole/mattermost-harness-bridge/internal/version.Version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - id: harness
+    main: ./cmd/harness
+    binary: harness
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/bambamboole/mattermost-harness-bridge/internal/version.Version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: broker
+    ids: [broker]
+    name_template: "broker_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files: [README.md]
+  - id: harness
+    ids: [harness]
+    name_template: "harness_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files: [README.md]
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  # release-please owns CHANGELOG.md and the release notes.
+  disable: true
+
+release:
+  # release-please creates the GitHub release and tag; goreleaser only adds
+  # the archives and checksums to it.
+  mode: keep-existing
+  github:
+    owner: bambamboole
+    name: mattermost-harness-bridge
+  footer: |
+    ## Container image
+
+    ```
+    docker pull ghcr.io/bambamboole/mattermost-harness-bridge:{{ .Version }}
+    ```

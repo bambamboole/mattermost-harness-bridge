@@ -1,0 +1,18 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "package-name": "mattermost-harness-bridge",
+      "include-component-in-tag": false,
+      "bump-minor-pre-major": true,
+      "changelog-types": [
+        { "type": "feat", "section": "Features", "hidden": false },
+        { "type": "fix", "section": "Bug Fixes", "hidden": false },
+        { "type": "docs", "section": "Documentation", "hidden": false },
+        { "type": "refactor", "section": "Refactors", "hidden": false },
+        { "type": "build", "section": "Build", "hidden": false },
+        { "type": "chore", "section": "Chores", "hidden": false }
+      ]
+    }
+  }
+}

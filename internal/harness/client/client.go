@@ -103,7 +103,7 @@ func (c *Client) session(ctx context.Context) error {
 	conn := wire.New(ws)
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()
-	defer conn.Close(int(websocket.StatusNormalClosure), "bye")
+	defer func() { _ = conn.Close(int(websocket.StatusNormalClosure), "bye") }()
 
 	hello, err := protocol.New(protocol.TypeHello, "", c.Hello())
 	if err != nil {
@@ -197,7 +197,7 @@ func (c *Client) readLoop(ctx context.Context, s *session) error {
 
 func (c *Client) handle(ctx context.Context, s *session, env protocol.Envelope) {
 	conn := s.conn
-	var ack *protocol.Ack
+	var ack protocol.Ack
 	switch env.Type {
 	case protocol.TypePong:
 		select {
@@ -222,37 +222,32 @@ func (c *Client) handle(ctx context.Context, s *session, env protocol.Envelope) 
 	case protocol.TypeJobDispatch:
 		var d protocol.JobDispatch
 		if err := env.Decode(&d); err != nil {
-			ack = &protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
+			ack = protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
 		} else {
-			a := c.Handler.OnDispatch(ctx, env.JobID, d)
-			ack = &a
+			ack = c.Handler.OnDispatch(ctx, env.JobID, d)
 		}
 	case protocol.TypeJobCancel:
 		var jc protocol.JobCancel
 		if err := env.Decode(&jc); err != nil {
-			ack = &protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
+			ack = protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
 		} else {
-			a := c.Handler.OnCancel(ctx, env.JobID, jc)
-			ack = &a
+			ack = c.Handler.OnCancel(ctx, env.JobID, jc)
 		}
 	case protocol.TypeApprovalResponse:
 		var r protocol.ApprovalResponse
 		if err := env.Decode(&r); err != nil {
-			ack = &protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
+			ack = protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
 		} else {
-			a := c.Handler.OnApprovalResponse(ctx, env.JobID, r)
-			ack = &a
+			ack = c.Handler.OnApprovalResponse(ctx, env.JobID, r)
 		}
 	default:
 		e, _ := protocol.Reply(protocol.TypeError, env, protocol.Error{Code: protocol.ErrUnknownType, Message: env.Type})
 		_ = conn.Send(ctx, e)
 		return
 	}
-	if ack != nil {
-		reply, _ := protocol.Reply(protocol.TypeAck, env, *ack)
-		if err := conn.Send(ctx, reply); err != nil {
-			c.Log.Error("send ack", "err", err)
-		}
+	reply, _ := protocol.Reply(protocol.TypeAck, env, ack)
+	if err := conn.Send(ctx, reply); err != nil {
+		c.Log.Error("send ack", "err", err)
 	}
 }
 

@@ -124,7 +124,7 @@ func newWorld(t *testing.T) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	mm := mmtest.New()
 	mm.AddUser(ownerID, "manuel")
 

@@ -1,7 +1,8 @@
-/bin/
+.git
+.github
+dist
+bin
 *.db
 *.db-wal
 *.db-shm
 .env
-*.local.json
-/dist/

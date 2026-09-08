@@ -81,7 +81,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("permission: listen %s: %w", s.Path, err)
 	}
 	if err := os.Chmod(s.Path, 0o600); err != nil {
-		ln.Close()
+		_ = ln.Close()
 		return err
 	}
 	s.ln = ln
@@ -118,7 +118,7 @@ func (s *Server) accept() {
 }
 
 func (s *Server) handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	var req Request
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&req); err != nil {
 		s.logf("permission: bad request: %v", err)
@@ -147,7 +147,7 @@ func Ask(ctx context.Context, socket string, req Request) (Decision, error) {
 	if err != nil {
 		return Decision{}, fmt.Errorf("permission: dial %s: %w", socket, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if dl, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(dl)
 	}

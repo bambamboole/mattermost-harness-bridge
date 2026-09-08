@@ -22,6 +22,7 @@ import (
 	"github.com/bambamboole/mattermost-harness-bridge/internal/broker/mattermost"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/protocol"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/store/sqlite"
+	"github.com/bambamboole/mattermost-harness-bridge/internal/version"
 )
 
 type config struct {
@@ -111,14 +112,14 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	mm := mattermost.New(cfg.MMURL, cfg.MMToken)
 	me, err := mm.Me(ctx)
 	if err != nil {
 		return fmt.Errorf("mattermost login: %w", err)
 	}
-	log.Info("mattermost bot", "username", me.Username, "id", me.Id)
+	log.Info("broker starting", "version", version.Version, "bot", me.Username, "bot_id", me.Id)
 
 	h := hub.New(st, nil, log)
 	h.MinHarnessVersion = cfg.MinHarnessVersion
@@ -134,7 +135,7 @@ func run(log *slog.Logger) error {
 	h.Handler = c
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.Handle("GET "+protocol.Path, h)
 	mux.HandleFunc("POST /pair", func(w http.ResponseWriter, r *http.Request) {
 		var req core.PairRequest

@@ -13,6 +13,7 @@ import (
 
 	"github.com/bambamboole/mattermost-harness-bridge/internal/harness"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/harness/permission"
+	"github.com/bambamboole/mattermost-harness-bridge/internal/version"
 )
 
 func main() {
@@ -33,7 +34,7 @@ func main() {
 	case "config":
 		err = configCmd()
 	case "version":
-		fmt.Println(harness.Version)
+		fmt.Println(version.Version)
 	default:
 		usage()
 		os.Exit(2)
@@ -57,7 +58,7 @@ func usage() {
 func runCmd(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	debug := fs.Bool("debug", false, "verbose logging")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 	lvl := slog.LevelInfo
 	if *debug {
 		lvl = slog.LevelDebug
@@ -84,7 +85,7 @@ func pairCmd(args []string) error {
 	fs := flag.NewFlagSet("pair", flag.ExitOnError)
 	broker := fs.String("broker", "", "broker base URL, e.g. https://broker.example.com")
 	name := fs.String("name", "", "name for this harness (default: hostname)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 	if *broker == "" || fs.NArg() != 1 {
 		return fmt.Errorf("usage: harness pair --broker <url> <code>")
 	}
@@ -136,7 +137,7 @@ func configCmd() error {
 	if err != nil {
 		return err
 	}
-	os.Stdout.Write(b)
+	_, _ = os.Stdout.Write(b)
 	return nil
 }
 
@@ -145,7 +146,7 @@ func mcpCmd(args []string) error {
 	socket := fs.String("socket", "", "daemon permission socket")
 	job := fs.String("job", "", "job id")
 	timeout := fs.Duration("timeout", 2*time.Hour, "max wait per approval")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 	if *socket == "" || *job == "" {
 		return fmt.Errorf("--socket and --job are required")
 	}

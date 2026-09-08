@@ -35,6 +35,6 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open %d: %v", i, err)
 		}
-		s.Close()
+		_ = s.Close()
 	}
 }

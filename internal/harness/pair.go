@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/bambamboole/mattermost-harness-bridge/internal/version"
 )
 
 // PairRequest is what the harness posts to the broker's /pair endpoint.
@@ -36,7 +38,7 @@ func Pair(ctx context.Context, brokerURL, code, name string) (Config, error) {
 	if name == "" {
 		name = host
 	}
-	body, _ := json.Marshal(PairRequest{Code: strings.TrimSpace(code), Name: name, Hostname: host, Version: Version})
+	body, _ := json.Marshal(PairRequest{Code: strings.TrimSpace(code), Name: name, Hostname: host, Version: version.Version})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, brokerURL+"/pair", bytes.NewReader(body))
 	if err != nil {
 		return Config{}, err
@@ -46,7 +48,7 @@ func Pair(ctx context.Context, brokerURL, code, name string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, 64<<10))
 	if res.StatusCode != http.StatusOK {
 		return Config{}, fmt.Errorf("pairing failed: %s: %s", res.Status, strings.TrimSpace(string(raw)))

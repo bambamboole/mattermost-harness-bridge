@@ -94,7 +94,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	mm := mmtest.New()
 	mm.AddUser(ownerID, "manuel")
 	mm.AddUser(otherID, "mallory")

@@ -64,7 +64,7 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		}
 		wmu.Lock()
 		defer wmu.Unlock()
-		w.Write(append(b, '\n'))
+		_, _ = w.Write(append(b, '\n'))
 	}
 
 	sc := bufio.NewScanner(r)

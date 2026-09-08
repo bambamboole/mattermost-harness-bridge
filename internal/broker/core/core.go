@@ -175,7 +175,7 @@ func (c *Core) cancelJob(ctx context.Context, j store.Job, reason string) error 
 func (c *Core) createJob(ctx context.Context, p *model.Post, text string) {
 	harness, ok := c.pickHarness(ctx, p.UserId)
 	if !ok {
-		c.reply(ctx, p, fmt.Sprintf("You have no paired harness. Send me `pair` in a direct message to set one up."))
+		c.reply(ctx, p, "You have no paired harness. Send me `pair` in a direct message to set one up.")
 		return
 	}
 	root := rootOf(p)
@@ -314,7 +314,7 @@ func (c *Core) OnHello(ctx context.Context, h store.Harness, hello protocol.Hell
 		case store.JobQueued:
 			// Its dispatch sits in the outbox; the hub flushes it right after welcome.
 			if _, err := c.st.TransitionJob(ctx, j.ID, []store.JobState{store.JobQueued}, store.JobDispatched, store.JobPatch{}); err == nil {
-				c.edit(ctx, j, "⏳ Harness is back, starting…")
+				c.edit(j, "⏳ Harness is back, starting…")
 			}
 		}
 	}
@@ -328,7 +328,7 @@ func (c *Core) OnAck(ctx context.Context, h store.Harness, ref, jobID string, a 
 	if a.OK {
 		if _, err := c.st.TransitionJob(ctx, jobID, []store.JobState{store.JobDispatched}, store.JobRunning, store.JobPatch{}); err == nil {
 			if j, err := c.st.JobByID(ctx, jobID); err == nil {
-				c.edit(ctx, j, "▶️ Running on `"+h.Name+"`…")
+				c.edit(j, "▶️ Running on `"+h.Name+"`…")
 			}
 		}
 		return
@@ -353,7 +353,7 @@ func (c *Core) OnProgress(ctx context.Context, h store.Harness, jobID string, p 
 	if err != nil || j.HarnessID != h.ID {
 		return
 	}
-	c.edit(ctx, j, renderProgress(h.Name, p))
+	c.edit(j, renderProgress(h.Name, p))
 }
 
 func (c *Core) OnApprovalRequest(ctx context.Context, h store.Harness, jobID string, r protocol.ApprovalRequest) protocol.Ack {
@@ -385,7 +385,7 @@ func (c *Core) OnApprovalRequest(ctx context.Context, h store.Harness, jobID str
 	if _, err := c.mm.CreatePost(ctx, post); err != nil {
 		c.log.Error("approval post", "err", err)
 	}
-	c.edit(ctx, j, fmt.Sprintf("⏸ Waiting for approval: **%s** `%s`", r.Tool, truncate(r.Summary, 200)))
+	c.edit(j, fmt.Sprintf("⏸ Waiting for approval: **%s** `%s`", r.Tool, truncate(r.Summary, 200)))
 	c.audit(ctx, h.ID, "approval.requested", jobID, map[string]any{"approval": r.ApprovalID, "tool": r.Tool, "summary": r.Summary})
 	return protocol.Ack{OK: true}
 }
@@ -427,7 +427,7 @@ func (c *Core) OnResult(ctx context.Context, h store.Harness, jobID string, r pr
 func (c *Core) OnDisconnect(ctx context.Context, h store.Harness) {
 	jobs, _ := c.st.ListJobs(ctx, store.JobFilter{HarnessID: h.ID, States: []store.JobState{store.JobRunning, store.JobAwaitingApproval, store.JobDispatched}})
 	for _, j := range jobs {
-		c.edit(ctx, j, fmt.Sprintf("📡 `%s` disconnected. Waiting up to %s for it to come back.", h.Name, c.cfg.GracePeriod))
+		c.edit(j, fmt.Sprintf("📡 `%s` disconnected. Waiting up to %s for it to come back.", h.Name, c.cfg.GracePeriod))
 	}
 }
 
@@ -518,7 +518,7 @@ func (c *Core) HandleCallback(ctx context.Context, req *model.PostActionIntegrat
 	}
 	if pending, _ := c.st.PendingApprovalsByJob(ctx, j.ID); len(pending) == 0 {
 		if _, err := c.st.TransitionJob(ctx, j.ID, []store.JobState{store.JobAwaitingApproval}, store.JobRunning, store.JobPatch{}); err == nil {
-			c.edit(ctx, j, "▶️ Running…")
+			c.edit(j, "▶️ Running…")
 		}
 	}
 	c.audit(ctx, req.UserId, "approval.decided", j.ID, map[string]any{"approval": approvalID, "decision": decision, "tool": a.Tool})
@@ -696,7 +696,7 @@ type editor struct {
 }
 
 // edit schedules a debounced update of the job's status post.
-func (c *Core) edit(ctx context.Context, j store.Job, text string) {
+func (c *Core) edit(j store.Job, text string) {
 	if j.StatusPostID == "" {
 		return
 	}

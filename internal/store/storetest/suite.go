@@ -31,7 +31,7 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 	for name, fn := range tests {
 		t.Run(name, func(t *testing.T) {
 			s := open(t)
-			t.Cleanup(func() { s.Close() })
+			t.Cleanup(func() { _ = s.Close() })
 			fn(t, s)
 		})
 	}
@@ -50,7 +50,7 @@ func seedHarness(t *testing.T, s store.Store) store.Harness {
 	return h
 }
 
-func seedJob(t *testing.T, s store.Store, id string, state store.JobState) store.Job {
+func seedJob(t *testing.T, s store.Store, id string, state store.JobState) {
 	t.Helper()
 	j := store.Job{
 		ID: id, HarnessID: "hrn_1", MMUserID: "user_1", ChannelID: "ch", RootPostID: "root_" + id,
@@ -60,7 +60,6 @@ func seedJob(t *testing.T, s store.Store, id string, state store.JobState) store
 	if err := s.CreateJob(ctx, j); err != nil {
 		t.Fatal(err)
 	}
-	return j
 }
 
 func testHarnessCRUD(t *testing.T, s store.Store) {
@@ -180,9 +179,7 @@ func testJobExpireQueued(t *testing.T, s store.Store) {
 	seedHarness(t, s)
 	past := now().Add(-time.Minute)
 	future := now().Add(time.Minute)
-	j1 := seedJob(t, s, "job_old", store.JobQueued)
-	_ = j1
-	// Re-create with expiry, CreateJob stores the pointer.
+	seedJob(t, s, "job_old", store.JobQueued) // queued without expiry stays put
 	old := store.Job{ID: "job_exp", HarnessID: "hrn_1", MMUserID: "user_1", ChannelID: "ch", RootPostID: "r", TriggerPostID: "t",
 		Workspace: "ws", Prompt: "p", State: store.JobQueued, CreatedAt: now(), UpdatedAt: now(), ExpiresAt: &past}
 	fresh := old

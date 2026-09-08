@@ -45,7 +45,7 @@ func Open(path string) (*Store, error) {
 	db.SetConnMaxLifetime(0)
 	s := &Store{db: db}
 	if err := s.migrate(context.Background()); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("sqlite: migrate: %w", err)
 	}
 	return s, nil
@@ -83,11 +83,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)`, name, time.Now().UnixMilli()); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -168,7 +168,7 @@ func (s *Store) HarnessesByUser(ctx context.Context, mmUserID string) ([]store.H
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []store.Harness
 	for rows.Next() {
 		h, err := scanHarness(rows)
@@ -252,7 +252,7 @@ func (s *Store) queryJobs(ctx context.Context, q string, args ...any) ([]store.J
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []store.Job
 	for rows.Next() {
 		j, err := scanJob(rows)
@@ -430,7 +430,7 @@ func (s *Store) PendingApprovalsByJob(ctx context.Context, jobID string) ([]stor
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []store.Approval
 	for rows.Next() {
 		a, err := scanApproval(rows)
@@ -476,7 +476,7 @@ func (s *Store) PendingOutbox(ctx context.Context, harnessID string) ([]store.Ou
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []store.OutboxMessage
 	for rows.Next() {
 		var m store.OutboxMessage

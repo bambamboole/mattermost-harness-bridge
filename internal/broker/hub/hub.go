@@ -100,16 +100,16 @@ func (h *Hub) serve(harness store.Harness, c *wire.Conn) {
 	env, err := c.Recv(rctx)
 	rcancel()
 	if err != nil || env.Type != protocol.TypeHello {
-		c.Close(protocol.CloseProtocolViolate, "expected hello")
+		_ = c.Close(protocol.CloseProtocolViolate, "expected hello")
 		return
 	}
 	var hello protocol.Hello
 	if err := env.Decode(&hello); err != nil {
-		c.Close(protocol.CloseProtocolViolate, "bad hello")
+		_ = c.Close(protocol.CloseProtocolViolate, "bad hello")
 		return
 	}
 	if h.MinHarnessVersion != "" && versionLess(hello.HarnessVersion, h.MinHarnessVersion) {
-		c.Close(protocol.CloseVersionTooOld, "harness version "+hello.HarnessVersion+" < "+h.MinHarnessVersion)
+		_ = c.Close(protocol.CloseVersionTooOld, "harness version "+hello.HarnessVersion+" < "+h.MinHarnessVersion)
 		return
 	}
 
@@ -182,7 +182,7 @@ func (h *Hub) flushOutbox(ctx context.Context, harnessID string, c *wire.Conn) e
 
 func (h *Hub) handle(ctx context.Context, cn *conn, env protocol.Envelope) {
 	harness := cn.harness
-	var ack *protocol.Ack
+	var ack protocol.Ack
 	switch env.Type {
 	case protocol.TypePing:
 		_ = h.Store.TouchHarness(ctx, harness.ID, time.Now(), "")
@@ -211,28 +211,24 @@ func (h *Hub) handle(ctx context.Context, cn *conn, env protocol.Envelope) {
 	case protocol.TypeJobResult:
 		var r protocol.JobResult
 		if err := env.Decode(&r); err != nil {
-			ack = &protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
+			ack = protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
 		} else {
-			a := h.Handler.OnResult(ctx, harness, env.JobID, r)
-			ack = &a
+			ack = h.Handler.OnResult(ctx, harness, env.JobID, r)
 		}
 	case protocol.TypeApprovalRequest:
 		var r protocol.ApprovalRequest
 		if err := env.Decode(&r); err != nil {
-			ack = &protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
+			ack = protocol.Ack{OK: false, Code: protocol.NackBadPayload, Message: err.Error()}
 		} else {
-			a := h.Handler.OnApprovalRequest(ctx, harness, env.JobID, r)
-			ack = &a
+			ack = h.Handler.OnApprovalRequest(ctx, harness, env.JobID, r)
 		}
 	default:
 		e, _ := protocol.Reply(protocol.TypeError, env, protocol.Error{Code: protocol.ErrUnknownType, Message: env.Type})
 		_ = cn.c.Send(ctx, e)
 		return
 	}
-	if ack != nil {
-		reply, _ := protocol.Reply(protocol.TypeAck, env, *ack)
-		_ = cn.c.Send(ctx, reply)
-	}
+	reply, _ := protocol.Reply(protocol.TypeAck, env, ack)
+	_ = cn.c.Send(ctx, reply)
 }
 
 // Online reports whether the harness has a live connection.
