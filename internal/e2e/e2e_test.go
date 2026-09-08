@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -115,7 +116,6 @@ type world struct {
 	hrn   store.Harness
 	token string
 	hcfg  harness.Config
-	stop  context.CancelFunc
 }
 
 const (
@@ -172,23 +172,35 @@ func newWorld(t *testing.T) *world {
 	hcfg.ApprovalTimeoutMin = 1
 	hcfg.MaxJobs = 2
 
-	w := &world{t: t, ctx: ctx, st: st, mm: mm, hub: h, core: c, srv: srv, hrn: hrn, token: token, hcfg: hcfg, stop: cancel}
+	w := &world{t: t, ctx: ctx, st: st, mm: mm, hub: h, core: c, srv: srv, hrn: hrn, token: token, hcfg: hcfg}
 	w.startHarness()
 	return w
 }
 
+// startHarness runs the daemon and registers the cleanup that stops it.
+// Registering it last matters: cleanups run LIFO, so the harness is down
+// before the t.TempDir() it writes sessions, outbox and per-job files into
+// is removed.
 func (w *world) startHarness() {
+	w.t.Helper()
 	hctx, hstop := context.WithCancel(w.ctx)
-	w.stop = hstop
 	h, err := harness.New(w.hcfg, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	go func() {
-		if err := h.Run(hctx); err != nil && hctx.Err() == nil {
-			w.t.Errorf("harness run: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- h.Run(hctx) }()
+	w.t.Cleanup(func() {
+		hstop()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				w.t.Errorf("harness run: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			w.t.Error("harness did not stop within 10s")
 		}
-	}()
+	})
 	w.wait("harness online", func() bool { return w.hub.Online(w.hrn.ID) })
 }
 
