@@ -51,14 +51,97 @@ highest `seq` wins. App-level `ping`/`pong` every 15 s; the broker drops a
 harness after 45 s of silence, the harness reconnects after 10 s without a
 pong. A newer connection for the same harness replaces the old one.
 
+## Mattermost setup
+
+The broker needs one bot account, membership in the teams and channels
+where people mention it, and a way for the Mattermost server to reach the
+approval callback. Nothing else on the server changes.
+
+### 1. Bot account and token
+
+1. System Console → Integrations → Bot Accounts → *Enable Bot Account
+   Creation*: true.
+2. Product menu (top left) → Integrations → Bot Accounts → *Add Bot Account*.
+   Username `cc` (this is what people mention), display name and icon as you
+   like, role *Member*. It never needs `post:all` or admin rights: it only
+   posts into threads of channels it belongs to and into direct messages.
+3. On the bot, *Create New Token*, description `broker`. Copy it: this is
+   `MM_BOT_TOKEN`. The same token authenticates the WebSocket event stream.
+4. The bot's owner is the admin who created it. With *Disable bots when
+   owner is deactivated* on (the default), deactivating that admin silently
+   stops the bridge, so create it from an account that stays.
+
+### 2. Team and channel membership
+
+The broker only receives `posted` events for channels the bot is a member
+of. Add the bot to every team (`/invite @cc` from any channel of that team,
+or System Console → User Management → Teams) and to every channel where it
+should react (`/invite @cc` in the channel, or *Add people*). Private
+channels work the same way. Direct messages to the bot need no setup;
+pairing (`pair` in a DM) works as soon as the bot exists.
+
+### 3. Approval callbacks
+
+Allow/Deny buttons make the Mattermost *server* POST to
+`PUBLIC_URL/callback/approval`. Requirements:
+
+- `PUBLIC_URL` is reachable from the Mattermost server with a certificate
+  it trusts. A public hostname behind Caddy or nginx with Let's Encrypt is
+  the normal case.
+- If the broker lives on a private address or an internal hostname,
+  Mattermost refuses to call it unless the host is listed in System Console
+  → Environment → Web Server → *Allowed untrusted internal connections*
+  (`ServiceSettings.AllowedUntrustedInternalConnections`).
+- Interactive message actions are always enabled; there is no switch. Keep
+  the default *Outgoing integration requests timeout* (30 s), the callback
+  answers immediately.
+- The callback is verified by an HMAC in the button context and by the
+  clicking user's id, so the endpoint can stay unauthenticated at the
+  proxy. Do not put basic auth or an IP allowlist in front of
+  `/callback/approval` unless it admits the Mattermost server.
+
+### 4. Same thing with Pulumi
+
+With [`@bambamboole/pulumi-mattermost`](https://github.com/bambamboole/pulumi-provider-mattermost):
+
+```ts
+import * as mattermost from "@bambamboole/pulumi-mattermost";
+
+const cc = new mattermost.Bot("cc", {
+    username: "cc",
+    displayName: "Claude Code",
+    description: "Runs Claude Code jobs on the mentioning user's machine",
+});
+new mattermost.TeamMember("cc", { teamId: team.id, userId: cc.userId });
+new mattermost.ChannelMember("cc-dev", { channelId: dev.id, userId: cc.userId });
+const brokerToken = new mattermost.AccessToken("cc-broker", {
+    userId: cc.userId,
+    description: "broker",
+});
+export const mmBotToken = pulumi.secret(brokerToken.token); // -> MM_BOT_TOKEN
+```
+
+`enableBotAccountCreation: true` on `mattermost.SystemConfig` is the only
+server setting involved.
+
+### 5. Smoke test
+
+1. DM the bot `pair`: it answers with an `mhb harness pair …` line.
+2. In a channel the bot is in, post `@cc help`: it answers in a thread.
+   No answer means the bot is not a channel member or the WebSocket did not
+   connect (check the broker log for `mattermost websocket connected`).
+3. Pair a harness, post `@cc ws:<name> run git status`: the status post
+   turns into a running state and then a result.
+4. Trigger an approval, for example `@cc create a file called hello.txt`,
+   and click *Allow*. If the click shows a spinner and nothing happens,
+   Mattermost cannot reach `PUBLIC_URL/callback/approval`; the server log
+   then contains the outgoing request error.
+
 ## Broker setup
 
-1. Create a bot account in Mattermost (System Console → Integrations → Bot
-   Accounts) and copy its token. Enable *Integrations → Interactive
-   messages* if it is off.
-2. Run the broker behind a TLS reverse proxy (Caddy, nginx). Mattermost
-   must reach `PUBLIC_URL/callback/approval`; harnesses reach
-   `PUBLIC_URL/harness/v1` and `PUBLIC_URL/pair`.
+Run the broker behind a TLS reverse proxy (Caddy, nginx). Mattermost must
+reach `PUBLIC_URL/callback/approval`; harnesses reach
+`PUBLIC_URL/harness/v1` and `PUBLIC_URL/pair`.
 
 ```sh
 export MM_URL=https://mm.example.com
