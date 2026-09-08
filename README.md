@@ -135,3 +135,7 @@ receives `{"tool_name","input","tool_use_id"}` and returns a JSON string
 - Approval posts are only rewritten on click; expired ones keep their buttons (clicking says so).
 - Per-channel default workspace on the broker; today it is `ws:` in the message, else the thread's previous workspace, else the only configured one.
 - `--include-partial-messages` streaming; progress currently updates per assistant message.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -33,12 +33,12 @@ archives:
     ids: [broker]
     name_template: "broker_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
-    files: [README.md]
+    files: [LICENSE, README.md]
   - id: harness
     ids: [harness]
     name_template: "harness_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
-    files: [README.md]
+    files: [LICENSE, README.md]
 
 checksum:
   name_template: checksums.txt
