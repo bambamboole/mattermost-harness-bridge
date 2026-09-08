@@ -1,8 +1,11 @@
 .git
 .github
+.idea
 dist
 bin
 *.db
 *.db-wal
 *.db-shm
 .env
+identifier.sqlite
+CHANGELOG.md

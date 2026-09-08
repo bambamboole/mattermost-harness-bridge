@@ -1,7 +1,16 @@
 /bin/
+/dist/
 *.db
 *.db-wal
 *.db-shm
 .env
 *.local.json
-/dist/
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# JetBrains database tooling drops this next to the project
+identifier.sqlite
