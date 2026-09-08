@@ -187,8 +187,16 @@ type PostedEvent struct {
 	Mentions    []string // user ids mentioned in the post
 }
 
+// EventQueueSize bounds the backlog between the event stream and onPost.
+const EventQueueSize = 256
+
 // Listen consumes the event stream and calls onPost for every `posted`
 // event. It reconnects with backoff until ctx ends.
+//
+// onPost runs on its own goroutine, one event at a time and in the order
+// Mattermost sent them: handling a post costs several REST round-trips, and
+// doing that on the read loop would stall the stream until the server's
+// ping timeout tears the connection down.
 func (c *Client) Listen(ctx context.Context, log *slog.Logger, onPost func(context.Context, PostedEvent)) error {
 	wsURL := c.baseURL
 	switch {
@@ -197,11 +205,43 @@ func (c *Client) Listen(ctx context.Context, log *slog.Logger, onPost func(conte
 	case strings.HasPrefix(wsURL, "http://"):
 		wsURL = "ws://" + strings.TrimPrefix(wsURL, "http://")
 	}
+
+	events := make(chan PostedEvent, EventQueueSize)
+	worker := make(chan struct{})
+	go func() {
+		defer close(worker)
+		for ev := range events {
+			onPost(ctx, ev)
+		}
+	}()
+	defer func() {
+		close(events)
+		<-worker
+	}()
+	// A full queue means onPost cannot keep up. Waiting is still better than
+	// dropping somebody's mention on the floor.
+	deliver := func(ev PostedEvent) {
+		select {
+		case events <- ev:
+			return
+		default:
+		}
+		log.Warn("post queue full, event handling is behind", "size", EventQueueSize)
+		select {
+		case events <- ev:
+		case <-ctx.Done():
+		}
+	}
+
 	backoff := time.Second
 	for {
-		err := c.listenOnce(ctx, wsURL, log, onPost)
+		started := time.Now()
+		err := c.listenOnce(ctx, wsURL, log, deliver)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if time.Since(started) > time.Minute {
+			backoff = time.Second // the connection was healthy; start over
 		}
 		log.Warn("mattermost websocket ended", "err", err, "retry_in", backoff)
 		select {
@@ -213,7 +253,7 @@ func (c *Client) Listen(ctx context.Context, log *slog.Logger, onPost func(conte
 	}
 }
 
-func (c *Client) listenOnce(ctx context.Context, wsURL string, log *slog.Logger, onPost func(context.Context, PostedEvent)) error {
+func (c *Client) listenOnce(ctx context.Context, wsURL string, log *slog.Logger, deliver func(PostedEvent)) error {
 	ws, err := model.NewWebSocketClient4(wsURL, c.token)
 	if err != nil {
 		return err
@@ -252,7 +292,7 @@ func (c *Client) listenOnce(ctx context.Context, wsURL string, log *slog.Logger,
 			if m, _ := data["mentions"].(string); m != "" {
 				_ = json.Unmarshal([]byte(m), &mentions)
 			}
-			onPost(ctx, PostedEvent{Post: &p, ChannelType: ct, SenderName: sn, Mentions: mentions})
+			deliver(PostedEvent{Post: &p, ChannelType: ct, SenderName: sn, Mentions: mentions})
 		}
 	}
 }
