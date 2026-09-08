@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/bambamboole/mattermost-harness-bridge/compare/v0.2.1...v0.3.0) (2026-09-08)
+
+
+### Features
+
+* **harness:** agent adapters, default workspace, thread history ([69fee8a](https://github.com/bambamboole/mattermost-harness-bridge/commit/69fee8a00a0ff5c4e2620b79628a6d3d66e94d06))
+* **onboarding:** mhb harness init with a bot per user ([4d367c4](https://github.com/bambamboole/mattermost-harness-bridge/commit/4d367c4ae0d8d7c616c8a91bcd0a112d457ec090))
+
+
+### Bug Fixes
+
+* **broker:** accept the ws: token anywhere in the mention ([c9f0b46](https://github.com/bambamboole/mattermost-harness-bridge/commit/c9f0b46981c43ad6749c1509b93b3dc43c9cc7d9))
+
 ## [0.2.1](https://github.com/bambamboole/mattermost-harness-bridge/compare/v0.2.0...v0.2.1) (2026-09-08)
 
 
