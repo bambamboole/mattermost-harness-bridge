@@ -107,6 +107,23 @@ func SaveConfig(cfg Config) error {
 	return os.Rename(tmp, ConfigPath())
 }
 
+// RedactConfig replaces the harness token in raw config JSON so the config
+// can be pasted into a chat or a bug report. Unknown keys are preserved.
+func RedactConfig(raw []byte) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
+	}
+	if _, ok := m["token"]; ok {
+		m["token"] = json.RawMessage(`"redacted"`)
+	}
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
 func (c Config) Validate() error {
 	if c.BrokerURL == "" || c.Token == "" || c.OwnerMMUserID == "" || c.HarnessID == "" {
 		return errors.New("config incomplete: broker_url, harness_id, token and owner_mm_user_id are required (run `mhb harness pair`)")

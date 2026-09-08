@@ -78,3 +78,18 @@ func TestRenderHistory(t *testing.T) {
 		t.Fatal("empty history must render nothing")
 	}
 }
+
+func TestRedactConfig(t *testing.T) {
+	raw := []byte(`{"broker_url":"https://b.example.com","token":"hrt_secret","unknown_key":42}`)
+	out, err := RedactConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if strings.Contains(s, "hrt_secret") {
+		t.Fatalf("token still present: %s", s)
+	}
+	if !strings.Contains(s, `"token": "redacted"`) || !strings.Contains(s, `"unknown_key": 42`) {
+		t.Fatalf("unexpected output: %s", s)
+	}
+}
