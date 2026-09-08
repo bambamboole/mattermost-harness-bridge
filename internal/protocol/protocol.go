@@ -1,8 +1,8 @@
 // Package protocol defines the wire protocol between the broker and the
 // harnesses. Both binaries import it; nothing here may depend on either side.
 //
-// Transport: WebSocket on /harness/v1, one JSON envelope per text frame.
-// Breaking changes bump the path. Additive changes stay within v1; unknown
+// Transport: WebSocket on /harness/v2, one JSON envelope per text frame.
+// Breaking changes bump the path. Additive changes stay within v2; unknown
 // message types are answered with an error and otherwise ignored.
 package protocol
 
@@ -13,7 +13,7 @@ import (
 )
 
 // Path is the WebSocket endpoint the harness connects to.
-const Path = "/harness/v1"
+const Path = "/harness/v2"
 
 // Message types, harness -> broker.
 const (
@@ -177,7 +177,7 @@ type Pong struct {
 }
 
 // File carries a small attachment inline. Larger artefacts are out of scope
-// for v1; the broker enforces MaxFileBytes.
+// for v2; the broker enforces MaxFileBytes.
 type File struct {
 	Name    string `json:"name"`
 	Mime    string `json:"mime"`
@@ -216,6 +216,7 @@ type HistoryPost struct {
 // harness's default. History carries the thread's earlier posts; the
 // harness uses it only when it has no session for the thread yet.
 type JobDispatch struct {
+	BotUserID   string        `json:"bot_user_id"` // scopes the local conversation session
 	Workspace   string        `json:"workspace"`
 	Agent       string        `json:"agent,omitempty"`
 	Prompt      string        `json:"prompt"`

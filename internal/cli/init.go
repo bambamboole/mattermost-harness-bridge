@@ -26,9 +26,9 @@ func newHarnessInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Onboard this machine: pair with the broker and create your bot",
 		Long: `Asks the broker for a code, waits until you type "/harness init <code>" in
-any Mattermost channel, and writes the config. The first init creates your
-own bot (@harness-<username> unless --bot says otherwise); later inits add
-more machines to it. Then it asks for the agent and the workspaces.`,
+any Mattermost channel, and writes the config. Each init creates a new bot
+bound to this harness. Use /harness bot create <name> <harness-id> to add
+another bot to an existing harness. Then it asks for agent and workspaces.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
@@ -51,7 +51,7 @@ more machines to it. Then it asks for the agent and the workspaces.`,
 				return err
 			}
 			_, _ = fmt.Fprintf(out, "\nIn Mattermost, in a channel your bot should join, type:\n\n    %s\n\nWaiting (code valid until %s) ", start.Command, start.ExpiresAt.Local().Format(time.Kitchen))
-			res, err := harness.WaitInit(ctx, broker, start.Code, start.ExpiresAt, func() { _, _ = fmt.Fprint(out, ".") })
+			res, err := harness.WaitInit(ctx, broker, start.Code, start.PollToken, start.ExpiresAt, func() { _, _ = fmt.Fprint(out, ".") })
 			_, _ = fmt.Fprintln(out)
 			if err != nil {
 				return err
@@ -129,7 +129,7 @@ more machines to it. Then it asks for the agent and the workspaces.`,
 		},
 	}
 	cmd.Flags().StringVar(&broker, "broker", "", "broker base URL, e.g. https://broker.example.com (asked if missing)")
-	cmd.Flags().StringVar(&botName, "bot", "", "username for your bot (default: harness-<your username>; only used by the first init)")
+	cmd.Flags().StringVar(&botName, "bot", "", "unique username for this new bot (default: generated from your username)")
 	cmd.Flags().StringVar(&name, "name", "", "name for this machine (default: hostname)")
 	cmd.Flags().StringVar(&agentName, "agent", "", "default agent: claude or codex (asked if both are installed)")
 	cmd.Flags().StringVar(&defaultWorkspace, "default-workspace", "", "directory for jobs without ws: (default ~/.harness)")

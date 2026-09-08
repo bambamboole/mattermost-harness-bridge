@@ -6,8 +6,8 @@ context. With Claude Code, tool calls that need permission become
 Allow/Deny buttons in the thread.
 
 ```
-Mattermost (cloud, bot @harness)
-      ^ WS events down / REST posts up
+Mattermost (OAuth app, multiple bots per owner)
+      ^ one WS + incoming/outgoing webhooks per bot / REST posts
       v
 Broker (Go, public)                     mhb broker
       ^ jobs + approvals down / hello, progress, results up
@@ -40,7 +40,7 @@ One binary, `mhb`, serves both roles: `mhb broker` on the server,
 
 ## Protocol in one paragraph
 
-WebSocket on `/harness/v1`, one JSON envelope per frame
+WebSocket on `/harness/v2`, one JSON envelope per frame
 (`id`, `type`, `job_id`, `ref`, `ts`, `payload`). Auth is a bearer token on
 the upgrade request. The harness opens with `hello` (version, workspaces,
 jobs it still runs); the broker answers `welcome` with `resume`/`abort` per
@@ -54,180 +54,148 @@ pong. A newer connection for the same harness replaces the old one.
 
 ## Mattermost setup
 
-The broker needs one bot account, membership in the teams and channels
-where people mention it, and a way for the Mattermost server to reach the
-approval callback. Nothing else on the server changes.
+The broker is a confidential OAuth application. A system administrator installs it
+once per team; the application registers `/harness` automatically. Each user can
+then create multiple real Mattermost bots. Every bot belongs to one local harness;
+a harness can serve several bots owned by the same user.
 
-The bridge uses two kinds of bots: one **listener bot** (`harness`) whose
-token the broker uses for the event WebSocket, and **one bot per user**
-(`harness-<username>`) that `/harness init` creates and that posts on the
-owner's behalf. Mentions of a user bot are only visible to the broker in
-channels the listener bot is in, which is why `/harness init` and
-`/harness join` add both.
+There is no shared listener bot. Each bot has its own access token, event WebSocket,
+incoming webhook, and outgoing webhook. The broker records the human owner
+separately from Mattermost's bot creator (the administrator who authorized OAuth).
+Only that human owner can submit jobs or approve tool calls.
 
-### 1. Bot account and token
+### 1. Register the OAuth application
 
-1. System Console → Integrations → Bot Accounts → *Enable Bot Account
-   Creation*: true.
-2. Product menu (top left) → Integrations → Bot Accounts → *Add Bot Account*.
-   Username `harness` (this is what people mention), display name and icon
-   as you like, role *Member*. It never needs `post:all` or admin rights: it only
-   posts into threads of channels it belongs to and into direct messages.
-3. On the bot, *Create New Token*, description `broker`. Copy it: this is
-   `MM_BOT_TOKEN`. The same token authenticates the WebSocket event stream.
-4. The bot's owner is the admin who created it. With *Disable bots when
-   owner is deactivated* on (the default), deactivating that admin silently
-   stops the bridge, so create it from an account that stays.
+In Mattermost, enable OAuth applications, custom slash commands, bot account
+creation, incoming webhooks, outgoing webhooks, and personal access tokens in the
+System Console. Register an OAuth application under **Integrations → OAuth 2.0
+Applications** with callback URL:
 
-### 2. Team and channel membership
-
-The broker only receives `posted` events for channels the bot is a member
-of. Add the bot to every team (`/invite @harness` from any channel of that team,
-or System Console → User Management → Teams) and to every channel where it
-should react (`/invite @harness` in the channel, or *Add people*). Private
-channels work the same way. Direct messages to the bot need no setup;
-pairing (`pair` in a DM) works as soon as the bot exists.
-
-### 3. Approval callbacks
-
-Allow/Deny buttons make the Mattermost *server* POST to
-`PUBLIC_URL/callback/approval`. Requirements:
-
-- `PUBLIC_URL` is reachable from the Mattermost server with a certificate
-  it trusts. A public hostname behind Caddy or nginx with Let's Encrypt is
-  the normal case.
-- If the broker lives on a private address or an internal hostname,
-  Mattermost refuses to call it unless the host is listed in System Console
-  → Environment → Web Server → *Allowed untrusted internal connections*
-  (`ServiceSettings.AllowedUntrustedInternalConnections`).
-- Interactive message actions are always enabled; there is no switch. Keep
-  the default *Outgoing integration requests timeout* (30 s), the callback
-  answers immediately.
-- The callback is verified by an HMAC in the button context and by the
-  clicking user's id, so the endpoint can stay unauthenticated at the
-  proxy. Do not put basic auth or an IP allowlist in front of
-  `/callback/approval` unless it admits the Mattermost server.
-
-### 4. Onboarding: slash command and admin token
-
-`/harness init` needs two more things on the broker:
-
-- **A slash command** `/harness` (team command, method POST, URL
-  `PUBLIC_URL/commands/harness`, autocomplete on). Its token becomes
-  `MM_COMMAND_TOKEN`; the broker refuses requests with another token.
-- **An admin token** as `MM_ADMIN_TOKEN`: a personal access token of a
-  system admin user. Mattermost lets no bot create bots, so this is what
-  creates the per-user bots, their tokens, and team and channel
-  memberships. The broker touches it only for `/harness init` and
-  `/harness join`. Treat it accordingly: a dedicated admin user (say
-  `mhb-admin`) whose token lives only in the broker's environment.
-
-Without `MM_ADMIN_TOKEN` onboarding is off and the shared-bot pairing via
-DM keeps working.
-
-### 5. Same thing with Pulumi
-
-With [`@bambamboole/pulumi-mattermost`](https://github.com/bambamboole/pulumi-provider-mattermost):
-
-```ts
-import * as mattermost from "@bambamboole/pulumi-mattermost";
-
-const harness = new mattermost.Bot("harness", {
-    username: "harness",
-    displayName: "Claude Code",
-    description: "Runs Claude Code jobs on the mentioning user's machine",
-});
-new mattermost.TeamMember("harness", { teamId: team.id, userId: harness.userId });
-new mattermost.ChannelMember("harness-dev", { channelId: dev.id, userId: harness.userId });
-const brokerToken = new mattermost.AccessToken("harness-broker", {
-    userId: harness.userId,
-    description: "broker",
-});
-export const mmBotToken = pulumi.secret(brokerToken.token); // -> MM_BOT_TOKEN
+```text
+https://broker.example.com/oauth/callback
 ```
 
-```ts
-// Onboarding: the /harness command and the admin token for creating bots.
-const command = new mattermost.Command("harness", {
-    teamId: team.id, trigger: "harness", method: "P",
-    url: "https://broker.example.com/commands/harness",
-    autoComplete: true, autoCompleteHint: "init <code> | join | status",
-    autoCompleteDesc: "Pair your machine with the Claude Code bridge",
-    displayName: "Harness", description: "mhb onboarding",
-});
-const admin = new mattermost.User("mhb-admin", {
-    username: "mhb-admin", email: "mhb-admin@example.com",
-    roles: [mattermost.SystemRole.User, mattermost.SystemRole.Admin],
-});
-const adminToken = new mattermost.AccessToken("mhb-admin", { userId: admin.id, description: "mhb broker onboarding" });
-export const mmCommandToken = pulumi.secret(command.token); // -> MM_COMMAND_TOKEN
-export const mmAdminToken = pulumi.secret(adminToken.token); // -> MM_ADMIN_TOKEN
-```
+Use a confidential client and copy its client ID and client secret. The broker
+supports one configured Mattermost server and installations in multiple teams.
 
-`enableBotAccountCreation: true` on `mattermost.SystemConfig` is the only
-server setting involved.
-
-### 6. Smoke test
-
-1. DM the bot `pair`: it answers with an `mhb harness pair …` line.
-2. In a channel the bot is in, post `@harness help`: it answers in a thread.
-   No answer means the bot is not a channel member or the WebSocket did not
-   connect (check the broker log for `mattermost websocket connected`).
-3. Pair a harness, post `@harness ws:<name> run git status`: the status post
-   turns into a running state and then a result.
-4. Trigger an approval, for example `@harness create a file called hello.txt`,
-   and click *Allow*. If the click shows a spinner and nothing happens,
-   Mattermost cannot reach `PUBLIC_URL/callback/approval`; the server log
-   then contains the outgoing request error.
-
-## Broker setup
-
-Run the broker behind a TLS reverse proxy (Caddy, nginx). Mattermost must
-reach `PUBLIC_URL/callback/approval`; harnesses reach
-`PUBLIC_URL/harness/v1` and `PUBLIC_URL/pair`.
+### 2. Configure the broker
 
 ```sh
 export MM_URL=https://mm.example.com
-export MM_BOT_TOKEN=...                          # the listener bot
-export MM_ADMIN_TOKEN=...                        # optional: enables /harness init (bot per user)
-export MM_COMMAND_TOKEN=...                      # optional: the /harness slash command
+export MM_OAUTH_CLIENT_ID=...
+export MM_OAUTH_CLIENT_SECRET=...
+export MM_BOT_PROVISIONING_TOKEN=...
 export PUBLIC_URL=https://broker.example.com
-export CALLBACK_SECRET=$(openssl rand -hex 32)   # signs approval buttons
+export CALLBACK_SECRET=$(openssl rand -hex 32)
 export DB_PATH=/var/lib/broker/broker.db
 mhb broker
 ```
 
-Every setting is also a flag (`mhb broker --help`): `--mm-url`, `--mm-bot-token`,
-`--mm-admin-token`, `--command-token`, `--public-url`, `--callback-secret`, `--db`, `--listen`, `--queue-ttl`,
-`--grace-period`, `--job-timeout`, `--min-harness-version`. Flags win over
-environment variables.
+`MM_BOT_PROVISIONING_TOKEN` is a personal access token of a system administrator.
+It is used **only to issue access tokens for newly created bots**. Mattermost
+explicitly rejects OAuth sessions at that endpoint, including admin OAuth sessions;
+OAuth alone cannot complete real-bot provisioning. All other provisioning uses
+the administrator's OAuth grant. See the
+[Mattermost token handler](https://github.com/mattermost/mattermost/blob/master/server/channels/api4/user.go).
 
-## Harness setup (each developer)
+OAuth grants are encrypted in SQLite using a key derived from `CALLBACK_SECRET`.
+Keep that secret stable across restarts. The database also contains bot tokens,
+webhook credentials, and command tokens, so restrict access to it and its backups.
+
+The broker needs HTTPS reachable by Mattermost and developer machines. Allow these
+routes through the reverse proxy:
+
+- `/oauth/start` and `/oauth/callback`: browser installation.
+- `/commands/harness`: slash command callbacks.
+- `/webhooks/mattermost/<bot-id>`: outgoing webhook callbacks.
+- `/callback/approval`: signed tool-approval callbacks.
+- `/init` and `/init/<code>`: local harness pairing.
+- `/harness/v2`: the local harness WebSocket.
+
+For private broker addresses, add the hostname to Mattermost's **Allowed untrusted
+internal connections** setting. Interactive approval callbacks use the signed
+button context and verify the clicking user's ID.
+
+Every setting is also a flag; see `mhb broker --help`. The old `MM_BOT_TOKEN`,
+`MM_ADMIN_TOKEN`, and `MM_COMMAND_TOKEN` settings have been replaced.
+
+### 3. Install into a team
+
+Open `https://broker.example.com/oauth/start`, enter the team name from its
+Mattermost URL (or its team ID), and authorize as a system administrator who is a
+member of that team. The app creates `/harness`, stores its verification token,
+and refreshes the OAuth grant when needed. Reinstalling reuses its managed command;
+an unrelated existing `/harness` command produces a conflict instead of being
+replaced. Repeat for additional teams.
+
+## Harness setup
+
+In Mattermost, run `/harness init` for onboarding instructions. On the machine
+that should execute jobs:
 
 ```sh
-# grab mhb_<version>_<os>_<arch>.tar.gz from the GitHub release, or:
-go install github.com/bambamboole/mattermost-harness-bridge/cmd/mhb@latest
-mhb harness init --broker https://broker.example.com
-#   → shows "/harness init K7QX3M2P"; type that in a Mattermost channel
-#   → creates your bot @harness-<username>, pairs this machine, asks for
-#     the default agent and your workspaces
+mhb harness init --broker https://broker.example.com --bot my-laptop
+# Copy the displayed /harness init <code> into a public or private team channel.
+# The broker creates @my-laptop and its webhooks, then pairs this machine.
 mhb harness run
 ```
 
-`init` is a device flow: the laptop asks the broker for a code and polls;
-`/harness init <code>` in Mattermost is authenticated by the slash
-command's token and carries your user id, so the broker knows who is
-pairing without a DM. The first init creates **your own bot** through the
-broker's admin token; every job you start posts as that bot, and only you
-can trigger it: someone else mentioning `@harness-you` gets "Only @you can
-run jobs on this machine". `--bot <name>` picks another bot name, `--name`
-another machine name, `--yes` skips the prompts (`--agent`,
-`--default-workspace`, `--workspace name=dir` fill the config instead). A
-second machine runs `init` again and shares the bot.
+Pairing codes expire after ten minutes. Polling additionally requires a separate
+secret held by the local CLI; the code typed in Mattermost cannot retrieve the
+harness credentials. A successful result can be fetched once.
 
-- `/harness join` in a channel brings your bot (and the listener bot) into it.
-- `/harness status` lists your machines.
-- Brokers without `MM_ADMIN_TOKEN` keep the old flow: DM `pair` to the shared bot and `mhb harness pair`.
+Each `mhb harness init` creates a new bot and a new harness identity. `--bot` picks
+an unused username; without it the broker generates a name from the owner's
+username and a random suffix. `--name` sets the machine name. `--yes` skips prompts;
+`--agent`, `--default-workspace`, and repeated `--workspace name=dir` configure it.
+Reinitializing an already configured machine replaces that machine's local pairing.
+
+To add another bot to the same running harness, use its ID from `/harness status`:
+
+```text
+/harness bot create my-reviewer <harness-id>
+/harness join my-reviewer
+/harness status
+```
+
+Both bots can run on the same process and use its configured workspaces and agents.
+They keep independent conversations, including when mentioned in the same thread.
+A bot remains bound to its chosen harness even if another of the owner's harnesses
+is online. An offline harness queues jobs until the configured queue TTL expires.
+
+### Webhooks and channels
+
+Every bot has a native incoming webhook at `MM_URL/hooks/<incoming-hook-id>` owned
+by its Mattermost bot account. Its outgoing webhook targets the broker's bot-specific
+endpoint and uses `@<bot-name>` as an exact first-word trigger in public channels
+of its installed team. Treat webhook URLs and tokens as credentials.
+
+The bot's WebSocket also receives DMs, private-channel messages, mentions elsewhere
+in a message, and replies in existing bot threads. `/harness join <bot-name>` adds
+that bot to another channel in its installed team. A bot must be a channel member
+for its API access and event stream to work. Native outgoing webhooks alone do not
+support DMs or private channels. See
+[Mattermost outgoing webhooks](https://developers.mattermost.com/integrate/webhooks/outgoing/).
+
+WebSocket and webhook deliveries are deduplicated by bot ID and original post ID.
+The broker fetches webhook-triggered posts with the bot's API credentials and checks
+the owner, channel, and team. Jobs, cancellation, and local agent sessions are
+scoped to the bot. Replies without a new mention continue existing conversations;
+mention a specific bot when multiple bots share a thread and only one should act.
+
+Status, progress, attachments, and thread replies use the bot REST API, allowing
+existing posts to be edited. The incoming webhook remains available for external
+messages posted under that bot's identity.
+
+### Upgrading from the shared-bot bridge
+
+This is a breaking change. Upgrade the broker and local harness binaries together:
+the wire endpoint is now `/harness/v2`, and every dispatch includes its bot ID.
+Start with a fresh broker database: `0001_init.sql` contains the complete schema,
+and existing databases are not migrated. Complete OAuth installation, remove the
+old manually managed `/harness` command if it conflicts, and initialize new bots.
+Old thread-only session entries are not reused. The legacy `mhb harness pair`
+command is removed.
 
 Config lives in `~/Library/Application Support/mm-harness/config.json`
 (`$XDG_CONFIG_HOME/mm-harness` on Linux). Relevant keys:
@@ -259,15 +227,15 @@ A thread sticks to the agent and workspace of its first job; `agent:` or
 
 ## Using it
 
-- `@harness ws:infra bump the mattermost provider` starts a job in workspace `infra`; without `ws:` it runs in the harness's default folder.
-- `@harness agent:codex …` picks the agent; without `agent:` the harness's default is used.
+- `@my-laptop ws:infra bump the mattermost provider` starts a job in workspace `infra`; without `ws:` it runs in the harness's default folder.
+- `@my-laptop agent:codex …` picks the agent; without `agent:` the harness's default is used.
 - Reply in the same thread to continue: the harness resumes the agent
   session it kept for that thread. `ws:` and `agent:` can be omitted then.
 - Mentioning the bot for the first time inside an existing thread hands the
   agent the thread so far (the last 60 posts, without the bot's own), so
   "do what the thread says" works.
-- `@harness cancel` in a thread stops the job.
-- DM the bot: `pair`, `status`.
+- `@my-laptop cancel` in a thread stops the job.
+- DM your bot with a task to start a job; use `/harness status` to list bots and machines.
 
 ## Releases
 
@@ -285,7 +253,8 @@ with `contents` and `pull-requests` write): tags pushed with the default
 
 ```sh
 docker run --rm -p 8080:8080 -v broker-data:/data \
-  -e MM_URL=... -e MM_BOT_TOKEN=... -e PUBLIC_URL=... -e CALLBACK_SECRET=... \
+  -e MM_URL=... -e MM_OAUTH_CLIENT_ID=... -e MM_OAUTH_CLIENT_SECRET=... \
+  -e MM_BOT_PROVISIONING_TOKEN=... -e PUBLIC_URL=... -e CALLBACK_SECRET=... \
   ghcr.io/bambamboole/mattermost-harness-bridge:latest
 ```
 

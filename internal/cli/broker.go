@@ -2,7 +2,7 @@ package cli
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,27 +17,29 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/spf13/cobra"
 
+	"github.com/bambamboole/mattermost-harness-bridge/internal/broker/bots"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/broker/core"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/broker/hub"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/broker/mattermost"
+	"github.com/bambamboole/mattermost-harness-bridge/internal/broker/oauth"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/protocol"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/store/sqlite"
 	"github.com/bambamboole/mattermost-harness-bridge/internal/version"
 )
 
 type brokerOptions struct {
-	mmURL             string
-	mmToken           string
-	mmAdminToken      string
-	commandToken      string
-	publicURL         string
-	listen            string
-	dbPath            string
-	callbackSecret    string
-	minHarnessVersion string
-	queueTTL          time.Duration
-	gracePeriod       time.Duration
-	jobTimeout        time.Duration
+	mmURL                string
+	oauthClientID        string
+	oauthClientSecret    string
+	botProvisioningToken string
+	publicURL            string
+	listen               string
+	dbPath               string
+	callbackSecret       string
+	minHarnessVersion    string
+	queueTTL             time.Duration
+	gracePeriod          time.Duration
+	jobTimeout           time.Duration
 }
 
 func newBrokerCmd() *cobra.Command {
@@ -58,9 +60,9 @@ in its help text, so containers can be configured without arguments.`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.mmURL, "mm-url", env("MM_URL", ""), "Mattermost base URL [MM_URL]")
-	f.StringVar(&o.mmToken, "mm-bot-token", env("MM_BOT_TOKEN", ""), "bot account token [MM_BOT_TOKEN]")
-	f.StringVar(&o.mmAdminToken, "mm-admin-token", env("MM_ADMIN_TOKEN", ""), "personal access token of an admin user; enables /harness init, which creates a bot per user [MM_ADMIN_TOKEN]")
-	f.StringVar(&o.commandToken, "command-token", env("MM_COMMAND_TOKEN", ""), "token of the /harness slash command [MM_COMMAND_TOKEN]")
+	f.StringVar(&o.oauthClientID, "oauth-client-id", env("MM_OAUTH_CLIENT_ID", ""), "Mattermost OAuth application client ID [MM_OAUTH_CLIENT_ID]")
+	f.StringVar(&o.oauthClientSecret, "oauth-client-secret", env("MM_OAUTH_CLIENT_SECRET", ""), "Mattermost OAuth client secret [MM_OAUTH_CLIENT_SECRET]")
+	f.StringVar(&o.botProvisioningToken, "bot-provisioning-token", env("MM_BOT_PROVISIONING_TOKEN", ""), "admin personal access token used only to mint bot tokens (Mattermost forbids OAuth for this operation) [MM_BOT_PROVISIONING_TOKEN]")
 	f.StringVar(&o.publicURL, "public-url", env("PUBLIC_URL", ""), "URL under which Mattermost and harnesses reach this broker [PUBLIC_URL]")
 	f.StringVar(&o.listen, "listen", env("LISTEN_ADDR", ":8080"), "listen address [LISTEN_ADDR]")
 	f.StringVar(&o.dbPath, "db", env("DB_PATH", "broker.db"), "SQLite database path [DB_PATH]")
@@ -75,7 +77,7 @@ in its help text, so containers can be configured without arguments.`,
 func (o *brokerOptions) validate() error {
 	var missing []string
 	for _, kv := range []struct{ flag, val string }{
-		{"mm-url", o.mmURL}, {"mm-bot-token", o.mmToken}, {"public-url", o.publicURL}, {"callback-secret", o.callbackSecret},
+		{"mm-url", o.mmURL}, {"oauth-client-id", o.oauthClientID}, {"oauth-client-secret", o.oauthClientSecret}, {"bot-provisioning-token", o.botProvisioningToken}, {"public-url", o.publicURL}, {"callback-secret", o.callbackSecret},
 	} {
 		if kv.val == "" {
 			missing = append(missing, "--"+kv.flag)
@@ -101,55 +103,39 @@ func runBroker(ctx context.Context, o brokerOptions, log *slog.Logger) error {
 	}
 	defer func() { _ = st.Close() }()
 
-	mm := mattermost.New(o.mmURL, o.mmToken)
-	me, err := mm.Me(ctx)
+	key := sha256.Sum256([]byte("mhb/oauth/" + o.callbackSecret))
+	auth, err := oauth.New(oauth.Config{MMURL: o.mmURL, PublicURL: o.publicURL, ClientID: o.oauthClientID, ClientSecret: o.oauthClientSecret, EncryptionKey: key[:]}, st, log)
 	if err != nil {
-		return fmt.Errorf("mattermost login: %w", err)
+		return err
 	}
-	log.Info("broker starting", "version", version.Version, "bot", me.Username, "bot_id", me.Id)
+	log.Info("broker starting", "version", version.Version, "setup", o.publicURL+"/oauth/start")
 
 	h := hub.New(st, nil, log)
 	h.MinHarnessVersion = o.minHarnessVersion
 	c := core.New(core.Config{
-		BotUserID:      me.Id,
-		BotUsername:    me.Username,
 		PublicURL:      o.publicURL,
 		CallbackSecret: []byte(o.callbackSecret),
 		QueueTTL:       o.queueTTL,
 		GracePeriod:    o.gracePeriod,
 		JobTimeout:     o.jobTimeout,
-	}, st, mm, h, log)
+	}, st, nil, h, log)
 	h.Handler = c
-	if o.mmAdminToken != "" {
-		admin := mattermost.New(o.mmURL, o.mmAdminToken)
-		if _, err := admin.Me(ctx); err != nil {
-			return fmt.Errorf("mattermost admin login: %w", err)
+	issuer := mattermost.New(o.mmURL, o.botProvisioningToken)
+	c.WithProvisioner(func(ctx context.Context, teamID string) (mattermost.Provisioner, error) {
+		admin, err := auth.Client(ctx, teamID)
+		if err != nil {
+			return nil, err
 		}
-		c.WithOnboarding(admin, func(token string) mattermost.API { return mattermost.New(o.mmURL, token) })
-		log.Info("onboarding enabled", "command", o.commandToken != "")
-	}
+		return mattermost.WithBotTokenIssuer(admin, issuer), nil
+	}, func(token string) mattermost.API { return mattermost.New(o.mmURL, token) })
+	manager := bots.New(st, o.mmURL, c.HandleBotPost, log)
 
 	mux := http.NewServeMux()
+	auth.Register(mux)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/oauth/start", http.StatusSeeOther) })
+	mux.Handle("POST /webhooks/mattermost/{botID}", outgoingHandler(st, func(token string) webhookAPI { return mattermost.New(o.mmURL, token) }, c.HandleBotPost))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.Handle("GET "+protocol.Path, h)
-	mux.HandleFunc("POST /pair", func(w http.ResponseWriter, r *http.Request) {
-		var req core.PairRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		res, err := c.HandlePair(r.Context(), req)
-		switch {
-		case errors.Is(err, core.ErrBadPairingCode):
-			http.Error(w, err.Error(), http.StatusForbidden)
-			return
-		case err != nil:
-			log.Error("pair", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, res)
-	})
 	// Device-flow onboarding: the laptop asks for a code, the owner claims it
 	// with the slash command, the laptop polls for the result.
 	mux.HandleFunc("POST /init", func(w http.ResponseWriter, r *http.Request) {
@@ -173,7 +159,7 @@ func runBroker(ctx context.Context, o brokerOptions, log *slog.Logger) error {
 		writeJSON(w, res)
 	})
 	mux.HandleFunc("GET /init/{code}", func(w http.ResponseWriter, r *http.Request) {
-		res, err := c.PollInit(r.Context(), r.PathValue("code"))
+		res, err := c.PollInit(r.Context(), r.PathValue("code"), strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 		switch {
 		case errors.Is(err, core.ErrInitPending):
 			w.WriteHeader(http.StatusAccepted)
@@ -192,11 +178,12 @@ func runBroker(ctx context.Context, o brokerOptions, log *slog.Logger) error {
 		writeJSON(w, res)
 	})
 	mux.HandleFunc("POST /commands/harness", func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		if o.commandToken == "" || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("token")), []byte(o.commandToken)) != 1 {
+		if !auth.VerifyCommand(r.Context(), r.PostForm.Get("team_id"), r.PostForm.Get("token")) {
 			http.Error(w, "invalid command token", http.StatusUnauthorized)
 			return
 		}
@@ -224,7 +211,7 @@ func runBroker(ctx context.Context, o brokerOptions, log *slog.Logger) error {
 			errCh <- err
 		}
 	}()
-	go func() { errCh <- mm.Listen(ctx, log, c.HandlePost) }()
+	go manager.Run(ctx)
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
@@ -246,6 +233,7 @@ func runBroker(ctx context.Context, o brokerOptions, log *slog.Logger) error {
 		}
 	}
 	log.Info("shutting down")
+	stop()
 	h.Close()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -254,6 +242,7 @@ func runBroker(ctx context.Context, o brokerOptions, log *slog.Logger) error {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
 }
 

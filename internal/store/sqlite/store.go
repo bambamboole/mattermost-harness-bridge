@@ -283,6 +283,14 @@ func (s *Store) JobByID(ctx context.Context, id string) (store.Job, error) {
 func (s *Store) ListJobs(ctx context.Context, f store.JobFilter) ([]store.Job, error) {
 	where := []string{"1=1"}
 	var args []any
+	if f.BotUserID != "" {
+		where = append(where, "bot_user_id = ?")
+		args = append(args, f.BotUserID)
+	}
+	if f.TriggerPostID != "" {
+		where = append(where, "trigger_post_id = ?")
+		args = append(args, f.TriggerPostID)
+	}
 	if f.MMUserID != "" {
 		where = append(where, "mm_user_id = ?")
 		args = append(args, f.MMUserID)
@@ -507,12 +515,12 @@ func (s *Store) PurgeOutbox(ctx context.Context, ackedBefore time.Time) (int64, 
 
 // --- bots ------------------------------------------------------------------
 
-const botCols = `user_id, mm_user_id, username, token, created_at`
+const botCols = `user_id, mm_user_id, username, token, created_at, COALESCE(harness_id, ''), team_id, channel_id, incoming_hook_id, outgoing_hook_id, outgoing_token`
 
 func scanBot(row interface{ Scan(...any) error }) (store.Bot, error) {
 	var b store.Bot
 	var created int64
-	if err := row.Scan(&b.UserID, &b.MMUserID, &b.Username, &b.Token, &created); err != nil {
+	if err := row.Scan(&b.UserID, &b.MMUserID, &b.Username, &b.Token, &created, &b.HarnessID, &b.TeamID, &b.ChannelID, &b.IncomingHookID, &b.OutgoingHookID, &b.OutgoingToken); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return b, store.ErrNotFound
 		}
@@ -523,8 +531,11 @@ func scanBot(row interface{ Scan(...any) error }) (store.Bot, error) {
 }
 
 func (s *Store) CreateBot(ctx context.Context, b store.Bot) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO bots (`+botCols+`) VALUES (?, ?, ?, ?, ?)`,
-		b.UserID, b.MMUserID, b.Username, b.Token, ms(b.CreatedAt))
+	if err := s.checkBotHarness(ctx, b); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO bots (user_id, mm_user_id, username, token, created_at, harness_id, team_id, channel_id, incoming_hook_id, outgoing_hook_id, outgoing_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		b.UserID, b.MMUserID, b.Username, b.Token, ms(b.CreatedAt), nullString(b.HarnessID), b.TeamID, b.ChannelID, b.IncomingHookID, b.OutgoingHookID, b.OutgoingToken)
 	if isUniqueViolation(err) {
 		return store.ErrConflict
 	}
@@ -532,7 +543,7 @@ func (s *Store) CreateBot(ctx context.Context, b store.Bot) error {
 }
 
 func (s *Store) BotByOwner(ctx context.Context, mmUserID string) (store.Bot, error) {
-	return scanBot(s.db.QueryRowContext(ctx, `SELECT `+botCols+` FROM bots WHERE mm_user_id = ?`, mmUserID))
+	return scanBot(s.db.QueryRowContext(ctx, `SELECT `+botCols+` FROM bots WHERE mm_user_id = ? ORDER BY created_at, user_id LIMIT 1`, mmUserID))
 }
 
 func (s *Store) BotByUserID(ctx context.Context, botUserID string) (store.Bot, error) {
@@ -558,13 +569,13 @@ func (s *Store) ListBots(ctx context.Context) ([]store.Bot, error) {
 
 // --- init requests ---------------------------------------------------------
 
-const initCols = `code_hash, bot_name, harness_name, created_at, expires_at, claimed_at, harness_id, harness_token, fetched_at`
+const initCols = `code_hash, bot_name, harness_name, created_at, expires_at, claimed_at, harness_id, harness_token, fetched_at, bot_user_id, poll_token_hash`
 
 func scanInit(row interface{ Scan(...any) error }) (store.InitRequest, error) {
 	var r store.InitRequest
 	var created, expires int64
 	var claimed, fetched sql.NullInt64
-	err := row.Scan(&r.CodeHash, &r.BotName, &r.HarnessName, &created, &expires, &claimed, &r.HarnessID, &r.HarnessToken, &fetched)
+	err := row.Scan(&r.CodeHash, &r.BotName, &r.HarnessName, &created, &expires, &claimed, &r.HarnessID, &r.HarnessToken, &fetched, &r.BotUserID, &r.PollTokenHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return r, store.ErrNotFound
@@ -580,8 +591,8 @@ func scanInit(row interface{ Scan(...any) error }) (store.InitRequest, error) {
 
 func (s *Store) CreateInit(ctx context.Context, r store.InitRequest) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO init_requests (`+initCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.CodeHash, r.BotName, r.HarnessName, ms(r.CreatedAt), ms(r.ExpiresAt), msPtr(r.ClaimedAt), r.HarnessID, r.HarnessToken, msPtr(r.FetchedAt))
+		`INSERT INTO init_requests (`+initCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.CodeHash, r.BotName, r.HarnessName, ms(r.CreatedAt), ms(r.ExpiresAt), msPtr(r.ClaimedAt), r.HarnessID, r.HarnessToken, msPtr(r.FetchedAt), r.BotUserID, r.PollTokenHash)
 	if isUniqueViolation(err) {
 		return store.ErrConflict
 	}

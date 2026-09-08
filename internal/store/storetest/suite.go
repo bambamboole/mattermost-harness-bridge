@@ -327,7 +327,7 @@ func testBotsPerOwner(t *testing.T, s store.Store) {
 	if err := s.CreateBot(ctx, b); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateBot(ctx, store.Bot{UserID: "bot_2", MMUserID: "user_1", Username: "other", Token: "t", CreatedAt: now()}); !errors.Is(err, store.ErrConflict) {
+	if err := s.CreateBot(ctx, store.Bot{UserID: "bot_2", MMUserID: "user_1", Username: "other", Token: "t", CreatedAt: now()}); err != nil {
 		t.Fatalf("second bot for owner: %v", err)
 	}
 	if err := s.CreateBot(ctx, store.Bot{UserID: "bot_3", MMUserID: "user_2", Username: "harness-manuel", Token: "t", CreatedAt: now()}); !errors.Is(err, store.ErrConflict) {
@@ -341,7 +341,7 @@ func testBotsPerOwner(t *testing.T, s store.Store) {
 		t.Fatalf("unknown bot: %v", err)
 	}
 	list, _ := s.ListBots(ctx)
-	if len(list) != 1 {
+	if len(list) != 2 {
 		t.Fatalf("list: %d", len(list))
 	}
 }
