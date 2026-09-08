@@ -22,7 +22,7 @@ release-please derives the version and the changelog from them:
 - `feat(scope)!: …` or a `BREAKING CHANGE:` trailer → major (minor while 0.x)
 
 Scopes in use: `broker`, `harness`, `protocol`, `store`, `cli`, `onboarding`,
-`agent`, `ci`.
+`agent`, `oauth`, `docker`, `ci`.
 
 ## Where things go
 
@@ -37,8 +37,9 @@ carry most of the weight:
 
 ## Changing the wire protocol
 
-Additive changes (a new optional field, a new message type) stay on
-`/harness/v1`; unknown types are answered with an `error` and ignored.
+Additive changes (a new optional field, a new message type) stay on the
+current path (`/harness/v2`); unknown types are answered with an `error` and
+ignored.
 Anything that breaks an older harness bumps the path in
 `internal/protocol.Path` — a broker can then keep the old handler around
 during a rollout. `--min-harness-version` is the blunt alternative.

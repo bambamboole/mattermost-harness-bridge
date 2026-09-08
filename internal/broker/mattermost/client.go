@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -19,9 +20,9 @@ import (
 // MaxMessageLen is Mattermost's default post size limit.
 const MaxMessageLen = model.PostMessageMaxRunesV2
 
-// Admin is what /harness init needs beyond a bot: creating bots and their
-// tokens and adding members to teams and channels. Backed by an admin
-// user's personal access token; used only during onboarding.
+// Admin contains the management operations used during onboarding. The team's
+// OAuth installation manages bots and memberships; bot access-token creation
+// requires a separate non-OAuth credential via WithBotTokenIssuer.
 type Admin interface {
 	CreateBot(ctx context.Context, username, displayName, description string) (*model.Bot, error)
 	CreateBotToken(ctx context.Context, botUserID, description string) (string, error)
@@ -58,6 +59,7 @@ var (
 
 func New(baseURL, token string) *Client {
 	c := model.NewAPIv4Client(strings.TrimRight(baseURL, "/"))
+	c.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	c.SetToken(token)
 	return &Client{c: c, baseURL: strings.TrimRight(baseURL, "/"), token: token}
 }

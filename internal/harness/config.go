@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bambamboole/mattermost-harness-bridge/internal/protocol"
 )
 
 // Config is what `harness pair` writes and `harness run` reads.
@@ -166,7 +168,7 @@ func (c Config) WSURL() string {
 	case strings.HasPrefix(u, "http://"):
 		u = "ws://" + strings.TrimPrefix(u, "http://")
 	}
-	return u + "/harness/v1"
+	return u + protocol.Path
 }
 
 func (c Config) WorkspaceNames() []string {

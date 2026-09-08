@@ -1,4 +1,4 @@
-// Package sessions maps Mattermost threads to local Claude session IDs. The
+// Package sessions maps bot conversations to local agent session IDs. The
 // broker never sees session IDs; this file is the only place they live.
 package sessions
 
@@ -21,7 +21,7 @@ type Entry struct {
 type Map struct {
 	path string
 	mu   sync.Mutex
-	m    map[string]Entry // root_post_id -> entry
+	m    map[string]Entry // JSON [bot_user_id, root_post_id] -> entry
 }
 
 func Open(path string) (*Map, error) {
@@ -39,24 +39,24 @@ func Open(path string) (*Map, error) {
 	return s, nil
 }
 
-func (s *Map) Get(rootPostID string) (Entry, bool) {
+func (s *Map) Get(botUserID, rootPostID string) (Entry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.m[rootPostID]
+	e, ok := s.m[key(botUserID, rootPostID)]
 	return e, ok
 }
 
-func (s *Map) Put(rootPostID, sessionID, workspace, agent string) error {
+func (s *Map) Put(botUserID, rootPostID, sessionID, workspace, agent string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.m[rootPostID] = Entry{SessionID: sessionID, Workspace: workspace, Agent: agent, UpdatedAt: time.Now().UTC()}
+	s.m[key(botUserID, rootPostID)] = Entry{SessionID: sessionID, Workspace: workspace, Agent: agent, UpdatedAt: time.Now().UTC()}
 	return s.flush()
 }
 
-func (s *Map) Delete(rootPostID string) error {
+func (s *Map) Delete(botUserID, rootPostID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.m, rootPostID)
+	delete(s.m, key(botUserID, rootPostID))
 	return s.flush()
 }
 
@@ -74,4 +74,11 @@ func (s *Map) flush() error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+// Encoding the pair avoids ambiguous concatenations and never reuses legacy
+// thread-only entries, whose bot identity cannot be established safely.
+func key(botUserID, rootPostID string) string {
+	b, _ := json.Marshal([2]string{botUserID, rootPostID})
+	return string(b)
 }

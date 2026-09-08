@@ -21,8 +21,9 @@ it run and *where*.
   interactive-button callback. Anyone who can forge Mattermost events can
   start jobs.
 - **The broker is trusted by the harnesses.** It holds every harness token
-  hash, the bot tokens and, when onboarding is on, an admin token. Treat the
-  broker host and its database as production secrets.
+  hash, the bot tokens, the installing administrator's OAuth grant and the
+  bot-provisioning token. Treat the broker host and its database as
+  production secrets.
 - **A harness trusts only its owner.** Every `job.dispatch` carries the
   requester's Mattermost user id; the harness refuses anything that does not
   match `owner_mm_user_id` in its config, independently of what the broker
@@ -53,10 +54,19 @@ it run and *where*.
 
 ## Secrets in the broker database
 
-The SQLite database holds bot access tokens in plaintext (they are needed to
-post as each user's bot) and, briefly, unclaimed harness tokens for pending
-onboarding codes. Everything else is hashed. Keep `DB_PATH` on a volume only
-the broker can read, and back it up accordingly.
+The SQLite database holds bot access tokens, outgoing-webhook credentials and
+slash-command verification tokens in plaintext — posting as each user's bot
+needs them — plus, briefly, unclaimed harness tokens for pending onboarding
+codes. OAuth grants are encrypted with a key derived from `CALLBACK_SECRET`,
+so that secret has to stay stable across restarts and is itself worth
+protecting: losing it loses the grants, leaking it undoes their encryption.
+Harness tokens are hashed. Keep `DB_PATH` on a volume only the broker can
+read, and back it up accordingly.
+
+`MM_BOT_PROVISIONING_TOKEN` is an administrator's personal access token. The
+broker uses it for one operation Mattermost refuses to an OAuth session —
+minting an access token for a newly created bot — but it carries full admin
+rights regardless. Give it a dedicated account.
 
 ## Supported versions
 

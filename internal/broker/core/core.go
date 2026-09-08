@@ -87,16 +87,21 @@ type Core struct {
 	log   *slog.Logger
 	now   func() time.Time
 	// newPoster makes an API client for a user bot's token.
-	newPoster func(token string) mattermost.API
+	newPoster    func(token string) mattermost.API
+	provisioner  func(context.Context, string) (mattermost.Provisioner, error)
+	onboardingMu sync.Mutex
+	routingMu    sync.Mutex
 
-	mu      sync.Mutex
-	edits   map[string]*editor        // job id -> status post debouncer
-	posters map[string]mattermost.API // bot user id -> client
+	mu    sync.Mutex
+	edits map[string]*editor // job id -> status post debouncer
 }
 
 func New(cfg Config, st store.Store, mm mattermost.API, hub Sender, log *slog.Logger) *Core {
 	cfg.defaults()
-	return &Core{cfg: cfg, st: st, mm: mm, hub: hub, log: log, now: time.Now, edits: map[string]*editor{}, posters: map[string]mattermost.API{}}
+	if mm == nil {
+		mm = mattermost.UnavailableAPI{}
+	}
+	return &Core{cfg: cfg, st: st, mm: mm, hub: hub, log: log, now: time.Now, edits: map[string]*editor{}}
 }
 
 // WithOnboarding enables /harness init: admin creates bots and memberships,
@@ -107,31 +112,101 @@ func (c *Core) WithOnboarding(admin mattermost.Admin, newPoster func(token strin
 	return c
 }
 
-// api returns the client that posts for a bot: the owner's bot by id, or
-// the shared bot for "" and for bots the broker cannot build a client for.
+// api uses the current credentials of the job's bot. A missing bot never
+// falls back to another identity. Only legacy shared jobs use the shared client.
 func (c *Core) api(ctx context.Context, botUserID string) mattermost.API {
-	if botUserID == "" || botUserID == c.cfg.BotUserID || c.newPoster == nil {
-		return c.mm
+	if botUserID == "" || botUserID == c.cfg.BotUserID {
+		if c.mm != nil {
+			return c.mm
+		}
+		return mattermost.UnavailableAPI{}
 	}
-	c.mu.Lock()
-	p, ok := c.posters[botUserID]
-	c.mu.Unlock()
-	if ok {
-		return p
+	if c.newPoster == nil {
+		return mattermost.UnavailableAPI{}
 	}
 	b, err := c.st.BotByUserID(ctx, botUserID)
-	if err != nil {
-		c.log.Warn("unknown bot, posting as shared bot", "bot", botUserID)
-		return c.mm
+	if err != nil || b.Token == "" {
+		return mattermost.UnavailableAPI{}
 	}
-	p = c.newPoster(b.Token)
-	c.mu.Lock()
-	c.posters[botUserID] = p
-	c.mu.Unlock()
+	// Do not retain token-based clients across requests: tokens can rotate and
+	// bots can be removed while their jobs are still running.
+	p := c.newPoster(b.Token)
+	if p == nil {
+		return mattermost.UnavailableAPI{}
+	}
 	return p
 }
 
 // --- inbound posts ---------------------------------------------------------
+
+// HandleBotPost routes a post received by one specific bot's websocket or webhook.
+// Both transports may deliver the same post, including after a broker restart.
+func (c *Core) HandleBotPost(ctx context.Context, botUserID string, ev mattermost.PostedEvent) {
+	p := ev.Post
+	if p == nil || p.Id == "" || p.DeleteAt != 0 || p.UserId == botUserID || p.GetProp(model.PostPropsFromBot) != nil || p.Type != "" {
+		return
+	}
+	c.routingMu.Lock()
+	defer c.routingMu.Unlock()
+	bot, err := c.st.BotByUserID(ctx, botUserID)
+	if err != nil || c.newPoster == nil {
+		return
+	}
+	if _, err := c.st.BotByUserID(ctx, p.UserId); err == nil {
+		return
+	}
+	names := mentionedNames(p.Message)
+	addressed := names[strings.ToLower(bot.Username)]
+	for _, id := range ev.Mentions {
+		addressed = addressed || id == botUserID
+	}
+	if !addressed && model.ChannelType(ev.ChannelType) != model.ChannelTypeDirect {
+		if p.RootId == "" {
+			return
+		}
+		// A reply addressing another known bot is not a continuation for this bot.
+		bots, err := c.st.ListBots(ctx)
+		if err != nil {
+			c.log.Error("list bots", "err", err)
+			return
+		}
+		for _, other := range bots {
+			if other.UserID != botUserID && names[strings.ToLower(other.Username)] {
+				return
+			}
+		}
+		previous, err := c.st.ListJobs(ctx, store.JobFilter{BotUserID: botUserID, MMUserID: p.UserId, RootPostID: p.RootId, Limit: 1})
+		if err != nil || len(previous) == 0 {
+			return
+		}
+	}
+	target := mention{userID: bot.UserID, username: bot.Username, owner: bot.MMUserID, ownerName: bot.MMUserID, harnessID: bot.HarnessID, bound: true}
+	if p.UserId != bot.MMUserID {
+		if u, err := c.api(ctx, botUserID).GetUser(ctx, bot.MMUserID); err == nil {
+			target.ownerName = u.Username
+		}
+		c.replyAs(ctx, botUserID, p, fmt.Sprintf("Only @%s can run jobs on this machine.", target.ownerName))
+		c.audit(ctx, p.UserId, "job.forbidden", "", map[string]any{"bot": bot.Username})
+		return
+	}
+	prior, err := c.st.ListJobs(ctx, store.JobFilter{BotUserID: botUserID, TriggerPostID: p.Id, Limit: 1})
+	if err != nil {
+		c.log.Error("deduplicate post", "err", err)
+		return
+	}
+	if len(prior) != 0 {
+		return
+	}
+	text := stripMention(p.Message, bot.Username)
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "cancel", "stop":
+		c.handleCancel(ctx, p, target)
+	case "", "help":
+		c.replyAs(ctx, botUserID, p, helpText(bot.Username))
+	default:
+		c.createJob(ctx, p, text, target)
+	}
+}
 
 // HandlePost is called for every post the bot sees.
 func (c *Core) HandlePost(ctx context.Context, ev mattermost.PostedEvent) {
@@ -176,6 +251,15 @@ type mention struct {
 	username  string
 	owner     string
 	ownerName string
+	harnessID string
+	bound     bool
+}
+
+func (m mention) jobBotID() string {
+	if m.owner != "" {
+		return m.userID
+	}
+	return ""
 }
 
 // Mattermost trims the `mentions` of a posted event to the receiving
@@ -253,7 +337,7 @@ func (c *Core) handleDM(ctx context.Context, p *model.Post) {
 
 func (c *Core) handleCancel(ctx context.Context, p *model.Post, target mention) {
 	root := rootOf(p)
-	jobs, _ := c.st.ListJobs(ctx, store.JobFilter{RootPostID: root, MMUserID: p.UserId, States: store.ActiveStates, Limit: 5})
+	jobs, _ := c.st.ListJobs(ctx, store.JobFilter{BotUserID: target.jobBotID(), RootPostID: root, MMUserID: p.UserId, States: store.ActiveStates, Limit: 5})
 	if len(jobs) == 0 {
 		c.replyAs(ctx, target.userID, p, "Nothing running in this thread for you.")
 		return
@@ -285,13 +369,21 @@ func (c *Core) cancelJob(ctx context.Context, j store.Job, reason string) error 
 // createJob turns a mention into a dispatched (or queued) job posted by
 // the mentioned bot.
 func (c *Core) createJob(ctx context.Context, p *model.Post, text string, target mention) {
-	harness, ok := c.pickHarness(ctx, p.UserId)
+	var harness store.Harness
+	var ok bool
+	if target.bound {
+		var err error
+		harness, err = c.st.HarnessByID(ctx, target.harnessID)
+		ok = err == nil && harness.MMUserID == p.UserId
+	} else {
+		harness, ok = c.pickHarness(ctx, p.UserId)
+	}
 	if !ok {
 		c.replyAs(ctx, target.userID, p, "You have no paired harness. Run `mhb harness init` on your machine to set one up.")
 		return
 	}
 	root := rootOf(p)
-	if active, _ := c.st.ListJobs(ctx, store.JobFilter{RootPostID: root, States: store.ActiveStates, Limit: 1}); len(active) > 0 {
+	if active, _ := c.st.ListJobs(ctx, store.JobFilter{BotUserID: target.jobBotID(), MMUserID: p.UserId, RootPostID: root, States: store.ActiveStates, Limit: 1}); len(active) > 0 {
 		c.replyAs(ctx, target.userID, p, "A job is already running in this thread. Say `@"+target.username+" cancel` to stop it.")
 		return
 	}
@@ -306,13 +398,13 @@ func (c *Core) createJob(ctx context.Context, p *model.Post, text string, target
 		botUserID = target.userID
 	}
 	poster := c.api(ctx, botUserID)
-	user, err := c.mm.GetUser(ctx, p.UserId)
+	user, err := poster.GetUser(ctx, p.UserId)
 	if err != nil {
 		c.log.Error("get user", "err", err)
 		return
 	}
-	attachments := c.downloadAttachments(ctx, p)
-	history := c.threadHistory(ctx, p, root)
+	attachments := c.downloadAttachments(ctx, poster, p)
+	history := c.threadHistory(ctx, poster, p, root, target.username)
 
 	online := c.hub.Online(harness.ID)
 	now := c.now()
@@ -340,6 +432,7 @@ func (c *Core) createJob(ctx context.Context, p *model.Post, text string, target
 		return
 	}
 	env, err := protocol.New(protocol.TypeJobDispatch, job.ID, protocol.JobDispatch{
+		BotUserID:   botUserID,
 		Workspace:   workspace,
 		Agent:       agentName,
 		Prompt:      prompt,
@@ -388,11 +481,11 @@ const MaxHistoryPosts = 60
 // existing thread: everything before the trigger except the bot's own
 // status and approval posts. The harness uses it only for a thread it has
 // no session for yet.
-func (c *Core) threadHistory(ctx context.Context, trigger *model.Post, root string) []protocol.HistoryPost {
+func (c *Core) threadHistory(ctx context.Context, api mattermost.API, trigger *model.Post, root, botUsername string) []protocol.HistoryPost {
 	if trigger.RootId == "" {
 		return nil // a fresh thread: the trigger is the whole conversation
 	}
-	posts, err := c.mm.GetThread(ctx, root)
+	posts, err := api.GetThread(ctx, root)
 	if err != nil {
 		c.log.Warn("thread history", "root", root, "err", err)
 		return nil
@@ -412,12 +505,12 @@ func (c *Core) threadHistory(ctx context.Context, trigger *model.Post, root stri
 		name, ok := names[p.UserId]
 		if !ok {
 			name = p.UserId
-			if u, err := c.mm.GetUser(ctx, p.UserId); err == nil {
+			if u, err := api.GetUser(ctx, p.UserId); err == nil {
 				name = u.Username
 			}
 			names[p.UserId] = name
 		}
-		out = append(out, protocol.HistoryPost{Username: name, At: p.CreateAt, Text: stripMention(p.Message, c.cfg.BotUsername)})
+		out = append(out, protocol.HistoryPost{Username: name, At: p.CreateAt, Text: stripMention(p.Message, botUsername)})
 	}
 	if len(out) > MaxHistoryPosts {
 		out = out[len(out)-MaxHistoryPosts:]
@@ -425,15 +518,15 @@ func (c *Core) threadHistory(ctx context.Context, trigger *model.Post, root stri
 	return out
 }
 
-func (c *Core) downloadAttachments(ctx context.Context, p *model.Post) []protocol.File {
+func (c *Core) downloadAttachments(ctx context.Context, api mattermost.API, p *model.Post) []protocol.File {
 	var out []protocol.File
 	for _, id := range p.FileIds {
-		fi, err := c.mm.GetFileInfo(ctx, id)
+		fi, err := api.GetFileInfo(ctx, id)
 		if err != nil || fi.Size > protocol.MaxFileBytes {
 			c.log.Warn("attachment skipped", "file", id, "err", err)
 			continue
 		}
-		data, err := c.mm.DownloadFile(ctx, id)
+		data, err := api.DownloadFile(ctx, id)
 		if err != nil {
 			c.log.Warn("attachment download", "file", id, "err", err)
 			continue
@@ -1050,7 +1143,7 @@ func helpText(bot string) string {
 		"- `agent:claude` or `agent:codex` picks the coding agent; without it the thread's previous agent or the harness's default is used.\n" +
 		"- Reply in the same thread to continue the conversation.\n" +
 		"- `@" + bot + " cancel` stops the running job in a thread.\n" +
-		"- Onboarding: `mhb harness init` on your machine, then `/harness init <code>` here; `/harness join` brings your bot into a channel, `/harness status` lists your harnesses."
+		"- Onboarding: `mhb harness init` on your machine, then `/harness init <code>` here; `/harness join " + bot + "` brings this bot into a channel, `/harness status` lists your bots and harnesses."
 }
 
 func hashCode(code string) string {
