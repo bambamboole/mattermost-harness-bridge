@@ -26,6 +26,9 @@ func Run(t *testing.T, open func(t *testing.T) store.Store) {
 		"ApprovalExpired":       testApprovalExpired,
 		"ApprovalDuplicateID":   testApprovalDuplicateID,
 		"OutboxPendingAckPurge": testOutboxPendingAckPurge,
+		"BotsPerOwner":          testBotsPerOwner,
+		"InitDeviceFlow":        testInitDeviceFlow,
+		"JobKeepsBot":           testJobKeepsBot,
 		"AuditAppend":           testAuditAppend,
 	}
 	for name, fn := range tests {
@@ -316,5 +319,84 @@ func testAuditAppend(t *testing.T, s store.Store) {
 	}
 	if err := s.Append(ctx, store.AuditEntry{At: now(), Actor: "user_1", Action: "test.nodetails"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testBotsPerOwner(t *testing.T, s store.Store) {
+	b := store.Bot{UserID: "bot_1", MMUserID: "user_1", Username: "harness-manuel", Token: "tok", CreatedAt: now()}
+	if err := s.CreateBot(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateBot(ctx, store.Bot{UserID: "bot_2", MMUserID: "user_1", Username: "other", Token: "t", CreatedAt: now()}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("second bot for owner: %v", err)
+	}
+	if err := s.CreateBot(ctx, store.Bot{UserID: "bot_3", MMUserID: "user_2", Username: "harness-manuel", Token: "t", CreatedAt: now()}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("duplicate username: %v", err)
+	}
+	got, err := s.BotByOwner(ctx, "user_1")
+	if err != nil || got.UserID != "bot_1" || got.Token != "tok" {
+		t.Fatalf("by owner: %+v %v", got, err)
+	}
+	if _, err := s.BotByUserID(ctx, "bot_x"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown bot: %v", err)
+	}
+	list, _ := s.ListBots(ctx)
+	if len(list) != 1 {
+		t.Fatalf("list: %d", len(list))
+	}
+}
+
+func testInitDeviceFlow(t *testing.T, s store.Store) {
+	exp := now().Add(10 * time.Minute)
+	if err := s.CreateInit(ctx, store.InitRequest{CodeHash: "c1", BotName: "custom", HarnessName: "mbp", CreatedAt: now(), ExpiresAt: exp}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateInit(ctx, store.InitRequest{CodeHash: "c1", CreatedAt: now(), ExpiresAt: exp}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("duplicate code: %v", err)
+	}
+	// Pending: the laptop polls and gets no token.
+	r, err := s.FetchInit(ctx, "c1", now())
+	if err != nil || r.Claimed() || r.BotName != "custom" || r.HarnessName != "mbp" {
+		t.Fatalf("pending fetch: %+v %v", r, err)
+	}
+	if err := s.ClaimInit(ctx, "c1", now(), "hrn_1", "hrt_secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimInit(ctx, "c1", now(), "hrn_2", "x"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("second claim: %v", err)
+	}
+	if err := s.ClaimInit(ctx, "nope", now(), "hrn_2", "x"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown claim: %v", err)
+	}
+	r, err = s.FetchInit(ctx, "c1", now())
+	if err != nil || !r.Claimed() || r.HarnessID != "hrn_1" || r.HarnessToken != "hrt_secret" || r.FetchedAt == nil {
+		t.Fatalf("claimed fetch: %+v %v", r, err)
+	}
+	if _, err := s.FetchInit(ctx, "c1", now()); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("second fetch must not hand out the token again: %v", err)
+	}
+	if r, _ := s.InitByHarness(ctx, "hrn_1"); r.HarnessToken != "" {
+		t.Fatal("token must be wiped after fetch")
+	}
+	// Expired codes are gone for both sides.
+	_ = s.CreateInit(ctx, store.InitRequest{CodeHash: "old", CreatedAt: now(), ExpiresAt: now().Add(-time.Second)})
+	if _, err := s.FetchInit(ctx, "old", now()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expired fetch: %v", err)
+	}
+	if err := s.ClaimInit(ctx, "old", now(), "h", "t"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expired claim: %v", err)
+	}
+}
+
+func testJobKeepsBot(t *testing.T, s store.Store) {
+	seedHarness(t, s)
+	j := store.Job{ID: "job_b", HarnessID: "hrn_1", MMUserID: "user_1", ChannelID: "ch", RootPostID: "r", TriggerPostID: "t",
+		BotUserID: "bot_1", Workspace: "ws", Prompt: "p", State: store.JobRunning, CreatedAt: now(), UpdatedAt: now()}
+	if err := s.CreateJob(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.JobByID(ctx, "job_b")
+	if got.BotUserID != "bot_1" {
+		t.Fatalf("bot lost: %+v", got)
 	}
 }

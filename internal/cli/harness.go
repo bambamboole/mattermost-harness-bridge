@@ -22,7 +22,7 @@ func newHarnessCmd() *cobra.Command {
 		Use:   "harness",
 		Short: "Run and manage the harness on this machine",
 	}
-	cmd.AddCommand(newHarnessRunCmd(), newHarnessPairCmd(), newHarnessWorkspaceCmd(), newHarnessConfigCmd(), newHarnessMCPCmd())
+	cmd.AddCommand(newHarnessInitCmd(), newHarnessRunCmd(), newHarnessPairCmd(), newHarnessWorkspaceCmd(), newHarnessConfigCmd(), newHarnessMCPCmd())
 	return cmd
 }
 
@@ -77,8 +77,8 @@ func newHarnessPairCmd() *cobra.Command {
 	var broker, name string
 	cmd := &cobra.Command{
 		Use:   "pair <code>",
-		Short: "Pair this machine with the broker using a code from the bot",
-		Long:  "Send `pair` to the bot in a Mattermost direct message; it replies with a one-time code.",
+		Short: "Pair with a code from a direct message to the shared bot (brokers without onboarding)",
+		Long:  "Send `pair` to the shared bot in a Mattermost direct message; it replies with a one-time code. Prefer `mhb harness init`.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,8 @@ import (
 type brokerOptions struct {
 	mmURL             string
 	mmToken           string
+	mmAdminToken      string
+	commandToken      string
 	publicURL         string
 	listen            string
 	dbPath            string
@@ -56,6 +59,8 @@ in its help text, so containers can be configured without arguments.`,
 	f := cmd.Flags()
 	f.StringVar(&o.mmURL, "mm-url", env("MM_URL", ""), "Mattermost base URL [MM_URL]")
 	f.StringVar(&o.mmToken, "mm-bot-token", env("MM_BOT_TOKEN", ""), "bot account token [MM_BOT_TOKEN]")
+	f.StringVar(&o.mmAdminToken, "mm-admin-token", env("MM_ADMIN_TOKEN", ""), "personal access token of an admin user; enables /harness init, which creates a bot per user [MM_ADMIN_TOKEN]")
+	f.StringVar(&o.commandToken, "command-token", env("MM_COMMAND_TOKEN", ""), "token of the /harness slash command [MM_COMMAND_TOKEN]")
 	f.StringVar(&o.publicURL, "public-url", env("PUBLIC_URL", ""), "URL under which Mattermost and harnesses reach this broker [PUBLIC_URL]")
 	f.StringVar(&o.listen, "listen", env("LISTEN_ADDR", ":8080"), "listen address [LISTEN_ADDR]")
 	f.StringVar(&o.dbPath, "db", env("DB_PATH", "broker.db"), "SQLite database path [DB_PATH]")
@@ -115,6 +120,14 @@ func runBroker(ctx context.Context, o brokerOptions, log *slog.Logger) error {
 		JobTimeout:     o.jobTimeout,
 	}, st, mm, h, log)
 	h.Handler = c
+	if o.mmAdminToken != "" {
+		admin := mattermost.New(o.mmURL, o.mmAdminToken)
+		if _, err := admin.Me(ctx); err != nil {
+			return fmt.Errorf("mattermost admin login: %w", err)
+		}
+		c.WithOnboarding(admin, func(token string) mattermost.API { return mattermost.New(o.mmURL, token) })
+		log.Info("onboarding enabled", "command", o.commandToken != "")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
@@ -135,6 +148,63 @@ func runBroker(ctx context.Context, o brokerOptions, log *slog.Logger) error {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		writeJSON(w, res)
+	})
+	// Device-flow onboarding: the laptop asks for a code, the owner claims it
+	// with the slash command, the laptop polls for the result.
+	mux.HandleFunc("POST /init", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			BotName     string `json:"bot_name"`
+			HarnessName string `json:"harness_name"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		res, err := c.StartInit(r.Context(), req.BotName, req.HarnessName)
+		switch {
+		case errors.Is(err, core.ErrInitDisabled):
+			http.Error(w, err.Error(), http.StatusNotImplemented)
+			return
+		case err != nil:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, res)
+	})
+	mux.HandleFunc("GET /init/{code}", func(w http.ResponseWriter, r *http.Request) {
+		res, err := c.PollInit(r.Context(), r.PathValue("code"))
+		switch {
+		case errors.Is(err, core.ErrInitPending):
+			w.WriteHeader(http.StatusAccepted)
+			return
+		case errors.Is(err, core.ErrInitUnknown):
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		case errors.Is(err, core.ErrInitConsumed):
+			http.Error(w, err.Error(), http.StatusGone)
+			return
+		case err != nil:
+			log.Error("poll init", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, res)
+	})
+	mux.HandleFunc("POST /commands/harness", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if o.commandToken == "" || subtle.ConstantTimeCompare([]byte(r.PostForm.Get("token")), []byte(o.commandToken)) != 1 {
+			http.Error(w, "invalid command token", http.StatusUnauthorized)
+			return
+		}
+		res := c.HandleCommand(r.Context(), core.CommandRequest{
+			Token: r.PostForm.Get("token"), UserID: r.PostForm.Get("user_id"), UserName: r.PostForm.Get("user_name"),
+			ChannelID: r.PostForm.Get("channel_id"), TeamID: r.PostForm.Get("team_id"), RootID: r.PostForm.Get("root_id"),
+			Text: r.PostForm.Get("text"),
+		})
 		writeJSON(w, res)
 	})
 	mux.HandleFunc("POST /callback/approval", func(w http.ResponseWriter, r *http.Request) {

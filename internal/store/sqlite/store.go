@@ -225,14 +225,14 @@ func (s *Store) ConsumePairing(ctx context.Context, codeHash string, now time.Ti
 
 // --- jobs ------------------------------------------------------------------
 
-const jobCols = `id, harness_id, mm_user_id, channel_id, root_post_id, trigger_post_id, status_post_id,
+const jobCols = `id, harness_id, mm_user_id, channel_id, root_post_id, trigger_post_id, status_post_id, bot_user_id,
 	workspace, prompt, state, last_seq, result_text, error, created_at, updated_at, expires_at, finished_at`
 
 func scanJob(row interface{ Scan(...any) error }) (store.Job, error) {
 	var j store.Job
 	var created, updated int64
 	var expires, finished sql.NullInt64
-	err := row.Scan(&j.ID, &j.HarnessID, &j.MMUserID, &j.ChannelID, &j.RootPostID, &j.TriggerPostID, &j.StatusPostID,
+	err := row.Scan(&j.ID, &j.HarnessID, &j.MMUserID, &j.ChannelID, &j.RootPostID, &j.TriggerPostID, &j.StatusPostID, &j.BotUserID,
 		&j.Workspace, &j.Prompt, (*string)(&j.State), &j.LastSeq, &j.ResultText, &j.Error, &created, &updated, &expires, &finished)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -266,8 +266,8 @@ func (s *Store) queryJobs(ctx context.Context, q string, args ...any) ([]store.J
 
 func (s *Store) CreateJob(ctx context.Context, j store.Job) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO jobs (`+jobCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.ID, j.HarnessID, j.MMUserID, j.ChannelID, j.RootPostID, j.TriggerPostID, j.StatusPostID,
+		`INSERT INTO jobs (`+jobCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.ID, j.HarnessID, j.MMUserID, j.ChannelID, j.RootPostID, j.TriggerPostID, j.StatusPostID, j.BotUserID,
 		j.Workspace, j.Prompt, string(j.State), j.LastSeq, j.ResultText, j.Error,
 		ms(j.CreatedAt), ms(j.UpdatedAt), msPtr(j.ExpiresAt), msPtr(j.FinishedAt))
 	if isUniqueViolation(err) {
@@ -503,6 +503,143 @@ func (s *Store) PurgeOutbox(ctx context.Context, ackedBefore time.Time) (int64, 
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// --- bots ------------------------------------------------------------------
+
+const botCols = `user_id, mm_user_id, username, token, created_at`
+
+func scanBot(row interface{ Scan(...any) error }) (store.Bot, error) {
+	var b store.Bot
+	var created int64
+	if err := row.Scan(&b.UserID, &b.MMUserID, &b.Username, &b.Token, &created); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return b, store.ErrNotFound
+		}
+		return b, err
+	}
+	b.CreatedAt = fromMS(created)
+	return b, nil
+}
+
+func (s *Store) CreateBot(ctx context.Context, b store.Bot) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO bots (`+botCols+`) VALUES (?, ?, ?, ?, ?)`,
+		b.UserID, b.MMUserID, b.Username, b.Token, ms(b.CreatedAt))
+	if isUniqueViolation(err) {
+		return store.ErrConflict
+	}
+	return err
+}
+
+func (s *Store) BotByOwner(ctx context.Context, mmUserID string) (store.Bot, error) {
+	return scanBot(s.db.QueryRowContext(ctx, `SELECT `+botCols+` FROM bots WHERE mm_user_id = ?`, mmUserID))
+}
+
+func (s *Store) BotByUserID(ctx context.Context, botUserID string) (store.Bot, error) {
+	return scanBot(s.db.QueryRowContext(ctx, `SELECT `+botCols+` FROM bots WHERE user_id = ?`, botUserID))
+}
+
+func (s *Store) ListBots(ctx context.Context) ([]store.Bot, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+botCols+` FROM bots ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []store.Bot
+	for rows.Next() {
+		b, err := scanBot(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// --- init requests ---------------------------------------------------------
+
+const initCols = `code_hash, bot_name, harness_name, created_at, expires_at, claimed_at, harness_id, harness_token, fetched_at`
+
+func scanInit(row interface{ Scan(...any) error }) (store.InitRequest, error) {
+	var r store.InitRequest
+	var created, expires int64
+	var claimed, fetched sql.NullInt64
+	err := row.Scan(&r.CodeHash, &r.BotName, &r.HarnessName, &created, &expires, &claimed, &r.HarnessID, &r.HarnessToken, &fetched)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return r, store.ErrNotFound
+		}
+		return r, err
+	}
+	r.CreatedAt = fromMS(created)
+	r.ExpiresAt = fromMS(expires)
+	r.ClaimedAt = fromMSPtr(claimed)
+	r.FetchedAt = fromMSPtr(fetched)
+	return r, nil
+}
+
+func (s *Store) CreateInit(ctx context.Context, r store.InitRequest) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO init_requests (`+initCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.CodeHash, r.BotName, r.HarnessName, ms(r.CreatedAt), ms(r.ExpiresAt), msPtr(r.ClaimedAt), r.HarnessID, r.HarnessToken, msPtr(r.FetchedAt))
+	if isUniqueViolation(err) {
+		return store.ErrConflict
+	}
+	return err
+}
+
+func (s *Store) ClaimInit(ctx context.Context, codeHash string, now time.Time, harnessID, harnessToken string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE init_requests SET claimed_at = ?, harness_id = ?, harness_token = ?
+		  WHERE code_hash = ? AND claimed_at IS NULL AND expires_at > ?`,
+		ms(now), harnessID, harnessToken, codeHash, ms(now))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 1 {
+		return nil
+	}
+	r, err := s.initByCode(ctx, codeHash)
+	if err != nil || r.ExpiresAt.Before(now) || r.ExpiresAt.Equal(now) {
+		return store.ErrNotFound
+	}
+	return store.ErrConflict
+}
+
+func (s *Store) InitByCode(ctx context.Context, codeHash string) (store.InitRequest, error) {
+	return s.initByCode(ctx, codeHash)
+}
+
+func (s *Store) initByCode(ctx context.Context, codeHash string) (store.InitRequest, error) {
+	return scanInit(s.db.QueryRowContext(ctx, `SELECT `+initCols+` FROM init_requests WHERE code_hash = ?`, codeHash))
+}
+
+func (s *Store) FetchInit(ctx context.Context, codeHash string, now time.Time) (store.InitRequest, error) {
+	r, err := s.initByCode(ctx, codeHash)
+	if err != nil {
+		return r, err
+	}
+	if !r.ExpiresAt.After(now) {
+		return store.InitRequest{}, store.ErrNotFound
+	}
+	if !r.Claimed() {
+		return r, nil
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE init_requests SET fetched_at = ?, harness_token = '' WHERE code_hash = ? AND fetched_at IS NULL`, ms(now), codeHash)
+	if err != nil {
+		return store.InitRequest{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.InitRequest{}, store.ErrConflict
+	}
+	fetched := now
+	r.FetchedAt = &fetched
+	return r, nil
+}
+
+func (s *Store) InitByHarness(ctx context.Context, harnessID string) (store.InitRequest, error) {
+	return scanInit(s.db.QueryRowContext(ctx, `SELECT `+initCols+` FROM init_requests WHERE harness_id = ? ORDER BY created_at DESC LIMIT 1`, harnessID))
 }
 
 // --- audit -----------------------------------------------------------------

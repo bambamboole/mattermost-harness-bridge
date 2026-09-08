@@ -58,6 +58,13 @@ The broker needs one bot account, membership in the teams and channels
 where people mention it, and a way for the Mattermost server to reach the
 approval callback. Nothing else on the server changes.
 
+The bridge uses two kinds of bots: one **listener bot** (`harness`) whose
+token the broker uses for the event WebSocket, and **one bot per user**
+(`harness-<username>`) that `/harness init` creates and that posts on the
+owner's behalf. Mentions of a user bot are only visible to the broker in
+channels the listener bot is in, which is why `/harness init` and
+`/harness join` add both.
+
 ### 1. Bot account and token
 
 1. System Console → Integrations → Bot Accounts → *Enable Bot Account
@@ -101,7 +108,24 @@ Allow/Deny buttons make the Mattermost *server* POST to
   proxy. Do not put basic auth or an IP allowlist in front of
   `/callback/approval` unless it admits the Mattermost server.
 
-### 4. Same thing with Pulumi
+### 4. Onboarding: slash command and admin token
+
+`/harness init` needs two more things on the broker:
+
+- **A slash command** `/harness` (team command, method POST, URL
+  `PUBLIC_URL/commands/harness`, autocomplete on). Its token becomes
+  `MM_COMMAND_TOKEN`; the broker refuses requests with another token.
+- **An admin token** as `MM_ADMIN_TOKEN`: a personal access token of a
+  system admin user. Mattermost lets no bot create bots, so this is what
+  creates the per-user bots, their tokens, and team and channel
+  memberships. The broker touches it only for `/harness init` and
+  `/harness join`. Treat it accordingly: a dedicated admin user (say
+  `mhb-admin`) whose token lives only in the broker's environment.
+
+Without `MM_ADMIN_TOKEN` onboarding is off and the shared-bot pairing via
+DM keeps working.
+
+### 5. Same thing with Pulumi
 
 With [`@bambamboole/pulumi-mattermost`](https://github.com/bambamboole/pulumi-provider-mattermost):
 
@@ -122,10 +146,28 @@ const brokerToken = new mattermost.AccessToken("harness-broker", {
 export const mmBotToken = pulumi.secret(brokerToken.token); // -> MM_BOT_TOKEN
 ```
 
+```ts
+// Onboarding: the /harness command and the admin token for creating bots.
+const command = new mattermost.Command("harness", {
+    teamId: team.id, trigger: "harness", method: "P",
+    url: "https://broker.example.com/commands/harness",
+    autoComplete: true, autoCompleteHint: "init <code> | join | status",
+    autoCompleteDesc: "Pair your machine with the Claude Code bridge",
+    displayName: "Harness", description: "mhb onboarding",
+});
+const admin = new mattermost.User("mhb-admin", {
+    username: "mhb-admin", email: "mhb-admin@example.com",
+    roles: [mattermost.SystemRole.User, mattermost.SystemRole.Admin],
+});
+const adminToken = new mattermost.AccessToken("mhb-admin", { userId: admin.id, description: "mhb broker onboarding" });
+export const mmCommandToken = pulumi.secret(command.token); // -> MM_COMMAND_TOKEN
+export const mmAdminToken = pulumi.secret(adminToken.token); // -> MM_ADMIN_TOKEN
+```
+
 `enableBotAccountCreation: true` on `mattermost.SystemConfig` is the only
 server setting involved.
 
-### 5. Smoke test
+### 6. Smoke test
 
 1. DM the bot `pair`: it answers with an `mhb harness pair …` line.
 2. In a channel the bot is in, post `@harness help`: it answers in a thread.
@@ -146,7 +188,9 @@ reach `PUBLIC_URL/callback/approval`; harnesses reach
 
 ```sh
 export MM_URL=https://mm.example.com
-export MM_BOT_TOKEN=...
+export MM_BOT_TOKEN=...                          # the listener bot
+export MM_ADMIN_TOKEN=...                        # optional: enables /harness init (bot per user)
+export MM_COMMAND_TOKEN=...                      # optional: the /harness slash command
 export PUBLIC_URL=https://broker.example.com
 export CALLBACK_SECRET=$(openssl rand -hex 32)   # signs approval buttons
 export DB_PATH=/var/lib/broker/broker.db
@@ -154,7 +198,7 @@ mhb broker
 ```
 
 Every setting is also a flag (`mhb broker --help`): `--mm-url`, `--mm-bot-token`,
-`--public-url`, `--callback-secret`, `--db`, `--listen`, `--queue-ttl`,
+`--mm-admin-token`, `--command-token`, `--public-url`, `--callback-secret`, `--db`, `--listen`, `--queue-ttl`,
 `--grace-period`, `--job-timeout`, `--min-harness-version`. Flags win over
 environment variables.
 
@@ -163,11 +207,27 @@ environment variables.
 ```sh
 # grab mhb_<version>_<os>_<arch>.tar.gz from the GitHub release, or:
 go install github.com/bambamboole/mattermost-harness-bridge/cmd/mhb@latest
-# In Mattermost, DM the bot: `pair`  → it replies with a one-time code
-mhb harness pair --broker https://broker.example.com <code>
-mhb harness workspace add infra ~/Projects/artisan-os/infrastructure
+mhb harness init --broker https://broker.example.com
+#   → shows "/harness init K7QX3M2P"; type that in a Mattermost channel
+#   → creates your bot @harness-<username>, pairs this machine, asks for
+#     the default agent and your workspaces
 mhb harness run
 ```
+
+`init` is a device flow: the laptop asks the broker for a code and polls;
+`/harness init <code>` in Mattermost is authenticated by the slash
+command's token and carries your user id, so the broker knows who is
+pairing without a DM. The first init creates **your own bot** through the
+broker's admin token; every job you start posts as that bot, and only you
+can trigger it: someone else mentioning `@harness-you` gets "Only @you can
+run jobs on this machine". `--bot <name>` picks another bot name, `--name`
+another machine name, `--yes` skips the prompts (`--agent`,
+`--default-workspace`, `--workspace name=dir` fill the config instead). A
+second machine runs `init` again and shares the bot.
+
+- `/harness join` in a channel brings your bot (and the listener bot) into it.
+- `/harness status` lists your machines.
+- Brokers without `MM_ADMIN_TOKEN` keep the old flow: DM `pair` to the shared bot and `mhb harness pair`.
 
 Config lives in `~/Library/Application Support/mm-harness/config.json`
 (`$XDG_CONFIG_HOME/mm-harness` on Linux). Relevant keys:

@@ -558,3 +558,168 @@ func TestMentionCarriesAgentAndThreadHistory(t *testing.T) {
 		t.Fatalf("fresh dispatch: %+v", fresh)
 	}
 }
+
+func (f *fixture) enableOnboarding() {
+	f.core.WithOnboarding(f.mm, func(token string) mattermost.API { return f.mm.WithToken(token) })
+}
+
+func TestInitFlowCreatesBotAndPairs(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.core.StartInit(f.ctx, "", "mbp"); err != ErrInitDisabled {
+		t.Fatalf("without admin: %v", err)
+	}
+	f.enableOnboarding()
+	if _, err := f.core.StartInit(f.ctx, "Bad Name!", "mbp"); err == nil {
+		t.Fatal("invalid bot name accepted")
+	}
+	start, err := f.core.StartInit(f.ctx, "", "mbp")
+	if err != nil || len(start.Code) != InitCodeLength || start.Command != "/harness init "+start.Code {
+		t.Fatalf("start: %+v %v", start, err)
+	}
+	if _, err := f.core.PollInit(f.ctx, start.Code); err != ErrInitPending {
+		t.Fatalf("poll before claim: %v", err)
+	}
+	if _, err := f.core.PollInit(f.ctx, "NOPE"); err != ErrInitUnknown {
+		t.Fatalf("poll unknown: %v", err)
+	}
+
+	res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, UserName: "mallory", ChannelID: "chan", TeamID: "team_1", Text: "init " + start.Code})
+	if !strings.Contains(res.Text, "@harness-mallory") || res.ResponseType != "ephemeral" {
+		t.Fatalf("init reply: %+v", res)
+	}
+	bot, err := f.st.BotByOwner(f.ctx, otherID)
+	if err != nil || bot.Username != "harness-mallory" || bot.Token == "" {
+		t.Fatalf("bot: %+v %v", bot, err)
+	}
+	for _, m := range []string{"team_1:" + bot.UserID, "chan:" + bot.UserID, "team_1:" + botID, "chan:" + botID} {
+		if !f.mm.Memberships[m] {
+			t.Errorf("missing membership %s", m)
+		}
+	}
+	// Second init with the same code is refused.
+	if res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, ChannelID: "chan", Text: "init " + start.Code}); !strings.Contains(res.Text, "already used") {
+		t.Fatalf("reuse: %+v", res)
+	}
+
+	got, err := f.core.PollInit(f.ctx, start.Code)
+	if err != nil || got.MMUserID != otherID || got.Username != "mallory" || got.BotUsername == "" || !strings.HasPrefix(got.Token, "hrt_") {
+		t.Fatalf("poll: %+v %v", got, err)
+	}
+	if _, err := f.core.PollInit(f.ctx, start.Code); err != ErrInitConsumed {
+		t.Fatalf("second poll: %v", err)
+	}
+	h, err := f.st.HarnessByTokenHash(f.ctx, tokenHash(got.Token))
+	if err != nil || h.MMUserID != otherID || h.Name != "mbp" {
+		t.Fatalf("harness: %+v %v", h, err)
+	}
+
+	// A second machine for the same owner reuses the bot.
+	start2, _ := f.core.StartInit(f.ctx, "", "desktop")
+	f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, ChannelID: "chan2", TeamID: "team_1", Text: "init " + start2.Code})
+	if bots, _ := f.st.ListBots(f.ctx); len(bots) != 1 {
+		t.Fatalf("bots after second init: %d", len(bots))
+	}
+	if list, _ := f.st.HarnessesByUser(f.ctx, otherID); len(list) != 2 {
+		t.Fatalf("harnesses: %d", len(list))
+	}
+
+	// A custom bot name is honoured, a taken one refused.
+	start3, _ := f.core.StartInit(f.ctx, "robo", "x")
+	res = f.core.HandleCommand(f.ctx, CommandRequest{UserID: ownerID, ChannelID: "chan", TeamID: "team_1", Text: "init " + start3.Code})
+	if !strings.Contains(res.Text, "@robo") {
+		t.Fatalf("custom name: %+v", res)
+	}
+	start4, _ := f.core.StartInit(f.ctx, "robo", "x")
+	f.mm.AddUser("stranger", "somebody")
+	res = f.core.HandleCommand(f.ctx, CommandRequest{UserID: "stranger", ChannelID: "chan", TeamID: "team_1", Text: "init " + start4.Code})
+	if !strings.Contains(res.Text, "taken") {
+		t.Fatalf("taken name: %+v", res)
+	}
+}
+
+func TestUserBotRoutesToOwnerOnly(t *testing.T) {
+	f := newFixture(t)
+	f.enableOnboarding()
+	start, _ := f.core.StartInit(f.ctx, "", "mbp")
+	f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, ChannelID: "chan", TeamID: "team_1", Text: "init " + start.Code})
+	got, _ := f.core.PollInit(f.ctx, start.Code)
+	bot, _ := f.st.BotByOwner(f.ctx, otherID)
+	f.hub.online[got.HarnessID] = true
+
+	// The owner mentions their bot: job on their harness, posts as the bot.
+	p := &model.Post{Id: "t1", ChannelId: "chan", UserId: otherID, Message: "@harness-mallory ws:x hi"}
+	f.core.HandlePost(f.ctx, mattermost.PostedEvent{Post: p, ChannelType: "O", Mentions: []string{bot.UserID}})
+	sent := f.hub.last(t, protocol.TypeJobDispatch)
+	if sent.harness != got.HarnessID {
+		t.Fatalf("dispatched to %s, want %s", sent.harness, got.HarnessID)
+	}
+	jobs, _ := f.st.ListJobs(f.ctx, store.JobFilter{MMUserID: otherID})
+	if len(jobs) != 1 || jobs[0].BotUserID != bot.UserID {
+		t.Fatalf("job: %+v", jobs)
+	}
+	if tok := f.mm.PostToken(jobs[0].StatusPostID); tok != bot.Token {
+		t.Fatalf("status post token %q, want the bot's", tok)
+	}
+	var d protocol.JobDispatch
+	_ = sent.env.Decode(&d)
+	if d.Workspace != "x" || d.Prompt != "hi" {
+		t.Fatalf("mention not stripped for the user bot: %+v", d)
+	}
+
+	// Someone else mentions it: refused, as the bot, no job.
+	before := f.hub.count(protocol.TypeJobDispatch)
+	p2 := &model.Post{Id: "t2", ChannelId: "chan", UserId: ownerID, Message: "@harness-mallory do it"}
+	f.core.HandlePost(f.ctx, mattermost.PostedEvent{Post: p2, ChannelType: "O", Mentions: []string{bot.UserID}})
+	if f.hub.count(protocol.TypeJobDispatch) != before {
+		t.Fatal("job dispatched for non-owner")
+	}
+	last := f.mm.Last()
+	if !strings.Contains(last.Message, "Only @mallory") || f.mm.PostToken(last.Id) != bot.Token {
+		t.Fatalf("refusal: %+v token=%q", last, f.mm.PostToken(last.Id))
+	}
+
+	// Result and approval posts of that job use the bot too.
+	hrn, _ := f.st.HarnessByID(f.ctx, got.HarnessID)
+	f.core.OnAck(f.ctx, hrn, "x", jobs[0].ID, protocol.Ack{OK: true})
+	f.core.OnApprovalRequest(f.ctx, hrn, jobs[0].ID, protocol.ApprovalRequest{ApprovalID: "apr_9", Tool: "Bash", Summary: "ls", ExpiresAt: f.now.Add(time.Hour).UnixMilli()})
+	if tok := f.mm.PostToken(f.mm.Last().Id); tok != bot.Token {
+		t.Fatalf("approval post token %q", tok)
+	}
+
+	// The shared bot still works for the owner's own harness and posts as itself.
+	f.hub.online[harness1] = true
+	f.mention(ownerID, "@cc ws:infra go", "")
+	j := f.onlyJobFor(ownerID)
+	if j.BotUserID != "" || f.mm.PostToken(j.StatusPostID) != "" {
+		t.Fatalf("shared bot job: %+v token=%q", j, f.mm.PostToken(j.StatusPostID))
+	}
+
+	// /harness join adds both bots to another channel; /harness status answers.
+	res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, ChannelID: "chan3", TeamID: "team_1", Text: "join"})
+	if !strings.Contains(res.Text, "@harness-mallory") || !f.mm.Memberships["chan3:"+bot.UserID] || !f.mm.Memberships["chan3:"+botID] {
+		t.Fatalf("join: %+v", res)
+	}
+	if res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: ownerID, ChannelID: "chan3", Text: "join"}); !strings.Contains(res.Text, "no bot yet") {
+		t.Fatalf("join without bot: %+v", res)
+	}
+	if res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, Text: "status"}); !strings.Contains(res.Text, "mbp") {
+		t.Fatalf("status: %+v", res)
+	}
+}
+
+func (f *fixture) onlyJobFor(user string) store.Job {
+	jobs, err := f.st.ListJobs(f.ctx, store.JobFilter{MMUserID: user})
+	if err != nil || len(jobs) != 1 {
+		f.t.Fatalf("want exactly one job for %s, got %d (%v)", user, len(jobs), err)
+	}
+	return jobs[0]
+}
+
+func TestDefaultBotName(t *testing.T) {
+	if got := defaultBotName("Manuel"); got != "harness-manuel" {
+		t.Fatalf("got %q", got)
+	}
+	if got := defaultBotName("a-very-long-username-here"); len(got) > maxBotNameLength || strings.HasSuffix(got, "-") {
+		t.Fatalf("got %q", got)
+	}
+}

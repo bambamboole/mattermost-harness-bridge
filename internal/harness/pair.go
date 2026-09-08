@@ -58,7 +58,7 @@ func Pair(ctx context.Context, brokerURL, code, name string) (Config, error) {
 		return Config{}, fmt.Errorf("pairing: bad response: %w", err)
 	}
 	cfg := DefaultConfig()
-	if existing, err := os.ReadFile(ConfigPath()); err == nil {
+	if existing, err := readConfigFile(); err == nil {
 		_ = json.Unmarshal(existing, &cfg) // keep workspaces and tool lists
 	}
 	cfg.BrokerURL = brokerURL
@@ -72,3 +72,5 @@ func Pair(ctx context.Context, brokerURL, code, name string) (Config, error) {
 func decodeB64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
 }
+
+func readConfigFile() ([]byte, error) { return os.ReadFile(ConfigPath()) }

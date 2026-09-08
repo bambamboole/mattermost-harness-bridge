@@ -19,6 +19,18 @@ import (
 // MaxMessageLen is Mattermost's default post size limit.
 const MaxMessageLen = model.PostMessageMaxRunesV2
 
+// Admin is what /harness init needs beyond a bot: creating bots and their
+// tokens and adding members to teams and channels. Backed by an admin
+// user's personal access token; used only during onboarding.
+type Admin interface {
+	CreateBot(ctx context.Context, username, displayName, description string) (*model.Bot, error)
+	CreateBotToken(ctx context.Context, botUserID, description string) (string, error)
+	AddTeamMember(ctx context.Context, teamID, userID string) error
+	AddChannelMember(ctx context.Context, channelID, userID string) error
+	GetChannel(ctx context.Context, id string) (*model.Channel, error)
+	GetUserByUsername(ctx context.Context, username string) (*model.User, error)
+}
+
 // API is what the broker core uses. Implemented by Client; faked in tests.
 type API interface {
 	CreatePost(ctx context.Context, p *model.Post) (*model.Post, error)
@@ -39,7 +51,10 @@ type Client struct {
 	token   string
 }
 
-var _ API = (*Client)(nil)
+var (
+	_ API   = (*Client)(nil)
+	_ Admin = (*Client)(nil)
+)
 
 func New(baseURL, token string) *Client {
 	c := model.NewAPIv4Client(strings.TrimRight(baseURL, "/"))
@@ -127,6 +142,41 @@ func (c *Client) DownloadFile(ctx context.Context, id string) ([]byte, error) {
 func (c *Client) GetFileInfo(ctx context.Context, id string) (*model.FileInfo, error) {
 	fi, _, err := c.c.GetFileInfo(ctx, id)
 	return fi, wrap("get file info", err)
+}
+
+// --- admin operations -------------------------------------------------------
+
+func (c *Client) CreateBot(ctx context.Context, username, displayName, description string) (*model.Bot, error) {
+	b, _, err := c.c.CreateBot(ctx, &model.Bot{Username: username, DisplayName: displayName, Description: description})
+	return b, wrap("create bot", err)
+}
+
+func (c *Client) CreateBotToken(ctx context.Context, botUserID, description string) (string, error) {
+	t, _, err := c.c.CreateUserAccessToken(ctx, botUserID, description, 0)
+	if err != nil {
+		return "", wrap("create bot token", err)
+	}
+	return t.Token, nil
+}
+
+func (c *Client) AddTeamMember(ctx context.Context, teamID, userID string) error {
+	_, _, err := c.c.AddTeamMember(ctx, teamID, userID)
+	return wrap("add team member", err)
+}
+
+func (c *Client) AddChannelMember(ctx context.Context, channelID, userID string) error {
+	_, _, err := c.c.AddChannelMember(ctx, channelID, userID)
+	return wrap("add channel member", err)
+}
+
+func (c *Client) GetChannel(ctx context.Context, id string) (*model.Channel, error) {
+	ch, _, err := c.c.GetChannel(ctx, id)
+	return ch, wrap("get channel", err)
+}
+
+func (c *Client) GetUserByUsername(ctx context.Context, username string) (*model.User, error) {
+	u, _, err := c.c.GetUserByUsername(ctx, username, "")
+	return u, wrap("get user by username", err)
 }
 
 // PostedEvent is a new post as delivered over the WebSocket.

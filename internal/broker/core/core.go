@@ -31,6 +31,8 @@ type Config struct {
 	BotUsername    string
 	PublicURL      string // where Mattermost reaches the callback endpoint
 	CallbackSecret []byte
+	// CommandToken authenticates the /harness slash command; "" disables it.
+	CommandToken string
 
 	QueueTTL        time.Duration // how long a job waits for an offline harness
 	GracePeriod     time.Duration // offline harness with a running job -> lost
@@ -69,20 +71,56 @@ type Sender interface {
 }
 
 type Core struct {
-	cfg Config
-	st  store.Store
-	mm  mattermost.API
-	hub Sender
-	log *slog.Logger
-	now func() time.Time
+	cfg   Config
+	st    store.Store
+	mm    mattermost.API   // the shared listener bot
+	admin mattermost.Admin // nil: onboarding disabled
+	hub   Sender
+	log   *slog.Logger
+	now   func() time.Time
+	// newPoster makes an API client for a user bot's token.
+	newPoster func(token string) mattermost.API
 
-	mu    sync.Mutex
-	edits map[string]*editor // job id -> status post debouncer
+	mu      sync.Mutex
+	edits   map[string]*editor        // job id -> status post debouncer
+	posters map[string]mattermost.API // bot user id -> client
 }
 
 func New(cfg Config, st store.Store, mm mattermost.API, hub Sender, log *slog.Logger) *Core {
 	cfg.defaults()
-	return &Core{cfg: cfg, st: st, mm: mm, hub: hub, log: log, now: time.Now, edits: map[string]*editor{}}
+	return &Core{cfg: cfg, st: st, mm: mm, hub: hub, log: log, now: time.Now, edits: map[string]*editor{}, posters: map[string]mattermost.API{}}
+}
+
+// WithOnboarding enables /harness init: admin creates bots and memberships,
+// newPoster builds the client that posts as a user's bot.
+func (c *Core) WithOnboarding(admin mattermost.Admin, newPoster func(token string) mattermost.API) *Core {
+	c.admin = admin
+	c.newPoster = newPoster
+	return c
+}
+
+// api returns the client that posts for a bot: the owner's bot by id, or
+// the shared bot for "" and for bots the broker cannot build a client for.
+func (c *Core) api(ctx context.Context, botUserID string) mattermost.API {
+	if botUserID == "" || botUserID == c.cfg.BotUserID || c.newPoster == nil {
+		return c.mm
+	}
+	c.mu.Lock()
+	p, ok := c.posters[botUserID]
+	c.mu.Unlock()
+	if ok {
+		return p
+	}
+	b, err := c.st.BotByUserID(ctx, botUserID)
+	if err != nil {
+		c.log.Warn("unknown bot, posting as shared bot", "bot", botUserID)
+		return c.mm
+	}
+	p = c.newPoster(b.Token)
+	c.mu.Lock()
+	c.posters[botUserID] = p
+	c.mu.Unlock()
+	return p
 }
 
 // --- inbound posts ---------------------------------------------------------
@@ -97,25 +135,57 @@ func (c *Core) HandlePost(ctx context.Context, ev mattermost.PostedEvent) {
 		c.handleDM(ctx, p)
 		return
 	}
-	mentioned := false
-	for _, m := range ev.Mentions {
-		if m == c.cfg.BotUserID {
-			mentioned = true
-		}
-	}
-	if !mentioned {
+	target, ok := c.mentionedBot(ctx, ev)
+	if !ok {
 		return
 	}
-	text := stripMention(p.Message, c.cfg.BotUsername)
+	if target.owner != "" && target.owner != p.UserId {
+		c.replyAs(ctx, target.userID, p, fmt.Sprintf("Only @%s can run jobs on this machine.", target.ownerName))
+		c.audit(ctx, p.UserId, "job.forbidden", "", map[string]any{"bot": target.username})
+		return
+	}
+	text := stripMention(p.Message, target.username)
 	switch strings.ToLower(strings.TrimSpace(text)) {
 	case "cancel", "stop":
-		c.handleCancel(ctx, p)
+		c.handleCancel(ctx, p, target)
 		return
 	case "", "help":
-		c.reply(ctx, p, helpText(c.cfg.BotUsername))
+		c.replyAs(ctx, target.userID, p, helpText(target.username))
 		return
 	}
-	c.createJob(ctx, p, text)
+	c.createJob(ctx, p, text, target)
+}
+
+// mention is the bot a post addressed: the shared bot (owner "") or a
+// user's bot (owner set). A user bot wins when both are mentioned.
+type mention struct {
+	userID    string
+	username  string
+	owner     string
+	ownerName string
+}
+
+func (c *Core) mentionedBot(ctx context.Context, ev mattermost.PostedEvent) (mention, bool) {
+	var shared bool
+	for _, id := range ev.Mentions {
+		if id == c.cfg.BotUserID {
+			shared = true
+			continue
+		}
+		b, err := c.st.BotByUserID(ctx, id)
+		if err != nil {
+			continue
+		}
+		m := mention{userID: b.UserID, username: b.Username, owner: b.MMUserID, ownerName: b.MMUserID}
+		if u, err := c.mm.GetUser(ctx, b.MMUserID); err == nil {
+			m.ownerName = u.Username
+		}
+		return m, true
+	}
+	if shared {
+		return mention{userID: c.cfg.BotUserID, username: c.cfg.BotUsername}, true
+	}
+	return mention{}, false
 }
 
 func (c *Core) handleDM(ctx context.Context, p *model.Post) {
@@ -126,6 +196,10 @@ func (c *Core) handleDM(ctx context.Context, p *model.Post) {
 	}
 	switch cmd {
 	case "pair":
+		if c.admin != nil {
+			c.reply(ctx, p, "Run `mhb harness init --broker "+c.cfg.PublicURL+"` on your machine; it creates your own bot and pairs in one go.")
+			return
+		}
 		code, err := c.newPairingCode(ctx, p.UserId)
 		if err != nil {
 			c.log.Error("pairing code", "err", err)
@@ -140,11 +214,11 @@ func (c *Core) handleDM(ctx context.Context, p *model.Post) {
 	}
 }
 
-func (c *Core) handleCancel(ctx context.Context, p *model.Post) {
+func (c *Core) handleCancel(ctx context.Context, p *model.Post, target mention) {
 	root := rootOf(p)
 	jobs, _ := c.st.ListJobs(ctx, store.JobFilter{RootPostID: root, MMUserID: p.UserId, States: store.ActiveStates, Limit: 5})
 	if len(jobs) == 0 {
-		c.reply(ctx, p, "Nothing running in this thread for you.")
+		c.replyAs(ctx, target.userID, p, "Nothing running in this thread for you.")
 		return
 	}
 	for _, j := range jobs {
@@ -152,7 +226,7 @@ func (c *Core) handleCancel(ctx context.Context, p *model.Post) {
 			c.log.Error("cancel", "job", j.ID, "err", err)
 		}
 	}
-	c.reply(ctx, p, "Cancelling.")
+	c.replyAs(ctx, target.userID, p, "Cancelling.")
 }
 
 func (c *Core) cancelJob(ctx context.Context, j store.Job, reason string) error {
@@ -171,24 +245,30 @@ func (c *Core) cancelJob(ctx context.Context, j store.Job, reason string) error 
 	return c.hub.SendReliable(ctx, j.HarnessID, env)
 }
 
-// createJob turns a mention into a dispatched (or queued) job.
-func (c *Core) createJob(ctx context.Context, p *model.Post, text string) {
+// createJob turns a mention into a dispatched (or queued) job posted by
+// the mentioned bot.
+func (c *Core) createJob(ctx context.Context, p *model.Post, text string, target mention) {
 	harness, ok := c.pickHarness(ctx, p.UserId)
 	if !ok {
-		c.reply(ctx, p, "You have no paired harness. Send me `pair` in a direct message to set one up.")
+		c.replyAs(ctx, target.userID, p, "You have no paired harness. Run `mhb harness init` on your machine to set one up.")
 		return
 	}
 	root := rootOf(p)
 	if active, _ := c.st.ListJobs(ctx, store.JobFilter{RootPostID: root, States: store.ActiveStates, Limit: 1}); len(active) > 0 {
-		c.reply(ctx, p, "A job is already running in this thread. Say `@"+c.cfg.BotUsername+" cancel` to stop it.")
+		c.replyAs(ctx, target.userID, p, "A job is already running in this thread. Say `@"+target.username+" cancel` to stop it.")
 		return
 	}
 	workspace, prompt := splitWorkspace(text)
 	agentName, prompt := splitAgent(prompt)
 	if strings.TrimSpace(prompt) == "" {
-		c.reply(ctx, p, "Tell me what to do after the mention.")
+		c.replyAs(ctx, target.userID, p, "Tell me what to do after the mention.")
 		return
 	}
+	botUserID := ""
+	if target.owner != "" {
+		botUserID = target.userID
+	}
+	poster := c.api(ctx, botUserID)
 	user, err := c.mm.GetUser(ctx, p.UserId)
 	if err != nil {
 		c.log.Error("get user", "err", err)
@@ -203,14 +283,14 @@ func (c *Core) createJob(ctx context.Context, p *model.Post, text string) {
 	if !online {
 		status = fmt.Sprintf("💤 `%s` is offline. Holding the job for %s.", harness.Name, c.cfg.QueueTTL)
 	}
-	statusPost, err := c.mm.CreatePost(ctx, &model.Post{ChannelId: p.ChannelId, RootId: root, Message: status})
+	statusPost, err := poster.CreatePost(ctx, &model.Post{ChannelId: p.ChannelId, RootId: root, Message: status})
 	if err != nil {
 		c.log.Error("status post", "err", err)
 		return
 	}
 	job := store.Job{
 		ID: protocol.NewID("job"), HarnessID: harness.ID, MMUserID: p.UserId, ChannelID: p.ChannelId,
-		RootPostID: root, TriggerPostID: p.Id, StatusPostID: statusPost.Id, Workspace: workspace, Prompt: prompt,
+		RootPostID: root, TriggerPostID: p.Id, StatusPostID: statusPost.Id, BotUserID: botUserID, Workspace: workspace, Prompt: prompt,
 		State: store.JobDispatched, CreatedAt: now, UpdatedAt: now,
 	}
 	if !online {
@@ -284,6 +364,9 @@ func (c *Core) threadHistory(ctx context.Context, trigger *model.Post, root stri
 	var out []protocol.HistoryPost
 	for _, p := range posts {
 		if p.Id == trigger.Id || p.UserId == c.cfg.BotUserID || p.GetProp(model.PostPropsFromBot) != nil || p.Type != "" {
+			continue
+		}
+		if _, err := c.st.BotByUserID(ctx, p.UserId); err == nil {
 			continue
 		}
 		if p.CreateAt >= trigger.CreateAt && trigger.CreateAt > 0 {
@@ -427,7 +510,7 @@ func (c *Core) OnApprovalRequest(ctx context.Context, h store.Harness, jobID str
 	_, _ = c.st.TransitionJob(ctx, jobID, []store.JobState{store.JobDispatched, store.JobRunning}, store.JobAwaitingApproval, store.JobPatch{})
 	post := &model.Post{ChannelId: j.ChannelID, RootId: j.RootPostID, Message: ""}
 	post.AddProp(model.PostPropsAttachments, []*model.MessageAttachment{c.approvalAttachment(r, nonce)})
-	if _, err := c.mm.CreatePost(ctx, post); err != nil {
+	if _, err := c.api(ctx, j.BotUserID).CreatePost(ctx, post); err != nil {
 		c.log.Error("approval post", "err", err)
 	}
 	c.edit(j, fmt.Sprintf("⏸ Waiting for approval: **%s** `%s`", r.Tool, truncate(r.Summary, 200)))
@@ -673,7 +756,11 @@ func (c *Core) Sweep(ctx context.Context) {
 // --- posts -----------------------------------------------------------------
 
 func (c *Core) reply(ctx context.Context, to *model.Post, msg string) {
-	if _, err := c.mm.CreatePost(ctx, &model.Post{ChannelId: to.ChannelId, RootId: rootOf(to), Message: msg}); err != nil {
+	c.replyAs(ctx, "", to, msg)
+}
+
+func (c *Core) replyAs(ctx context.Context, botUserID string, to *model.Post, msg string) {
+	if _, err := c.api(ctx, botUserID).CreatePost(ctx, &model.Post{ChannelId: to.ChannelId, RootId: rootOf(to), Message: msg}); err != nil {
 		c.log.Error("reply", "err", err)
 	}
 }
@@ -707,9 +794,10 @@ func (c *Core) postResult(ctx context.Context, j store.Job, h store.Harness, r p
 		body = r.Error.Message
 	}
 	msg := meta + "\n\n" + body
+	api := c.api(ctx, j.BotUserID)
 	var fileIDs []string
 	if len(msg) > mattermost.MaxMessageLen-200 {
-		if fi, err := c.mm.UploadFile(ctx, j.ChannelID, "result.md", []byte(body)); err == nil {
+		if fi, err := api.UploadFile(ctx, j.ChannelID, "result.md", []byte(body)); err == nil {
 			fileIDs = append(fileIDs, fi.Id)
 		}
 		msg = meta + "\n\n" + truncate(body, mattermost.MaxMessageLen-len(meta)-300) + "\n\n_(full output attached)_"
@@ -719,13 +807,13 @@ func (c *Core) postResult(ctx context.Context, j store.Job, h store.Harness, r p
 		if err != nil || len(data) > protocol.MaxFileBytes {
 			continue
 		}
-		if fi, err := c.mm.UploadFile(ctx, j.ChannelID, f.Name, data); err == nil {
+		if fi, err := api.UploadFile(ctx, j.ChannelID, f.Name, data); err == nil {
 			fileIDs = append(fileIDs, fi.Id)
 		}
 	}
 	c.finalEdit(ctx, j, msg)
 	if len(fileIDs) > 0 {
-		if _, err := c.mm.CreatePost(ctx, &model.Post{ChannelId: j.ChannelID, RootId: j.RootPostID, Message: "📎 Attachments", FileIds: fileIDs}); err != nil {
+		if _, err := api.CreatePost(ctx, &model.Post{ChannelId: j.ChannelID, RootId: j.RootPostID, Message: "📎 Attachments", FileIds: fileIDs}); err != nil {
 			c.log.Error("attachment post", "err", err)
 		}
 	}
@@ -769,7 +857,7 @@ func (c *Core) edit(j store.Job, text string) {
 		e.timer = nil
 		e.last = time.Now()
 		e.mu.Unlock()
-		if err := c.mm.UpdatePost(context.Background(), j.StatusPostID, text, nil); err != nil {
+		if err := c.api(context.Background(), j.BotUserID).UpdatePost(context.Background(), j.StatusPostID, text, nil); err != nil {
 			c.log.Warn("edit status post", "job", j.ID, "err", err)
 		}
 	})
@@ -792,7 +880,7 @@ func (c *Core) finalEdit(ctx context.Context, j store.Job, text string) {
 	if j.StatusPostID == "" {
 		return
 	}
-	if err := c.mm.UpdatePost(ctx, j.StatusPostID, text, nil); err != nil {
+	if err := c.api(ctx, j.BotUserID).UpdatePost(ctx, j.StatusPostID, text, nil); err != nil {
 		c.log.Warn("final edit", "job", j.ID, "err", err)
 	}
 }
@@ -917,7 +1005,7 @@ func helpText(bot string) string {
 		"- `agent:claude` or `agent:codex` picks the coding agent; without it the thread's previous agent or the harness's default is used.\n" +
 		"- Reply in the same thread to continue the conversation.\n" +
 		"- `@" + bot + " cancel` stops the running job in a thread.\n" +
-		"- Direct messages: `pair` (new harness code), `status`."
+		"- Onboarding: `mhb harness init` on your machine, then `/harness init <code>` here; `/harness join` brings your bot into a channel, `/harness status` lists your harnesses."
 }
 
 func hashCode(code string) string {

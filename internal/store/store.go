@@ -60,6 +60,7 @@ type Job struct {
 	RootPostID    string
 	TriggerPostID string
 	StatusPostID  string // the bot's reply, edited with progress
+	BotUserID     string // the bot that posts for this job; "" is the shared bot
 	Workspace     string
 	Prompt        string
 	State         JobState
@@ -111,6 +112,31 @@ type OutboxMessage struct {
 	CreatedAt time.Time
 	AckedAt   *time.Time
 }
+
+// Bot is a user's own bot account, created by /harness init.
+type Bot struct {
+	UserID    string // the bot's Mattermost user id
+	MMUserID  string // the owner
+	Username  string
+	Token     string // posts as the bot
+	CreatedAt time.Time
+}
+
+// InitRequest is one device-flow onboarding: created by the laptop with a
+// code, claimed by the owner in Mattermost, fetched once by the laptop.
+type InitRequest struct {
+	CodeHash     string
+	BotName      string // requested bot username, "" for the default
+	HarnessName  string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
+	ClaimedAt    *time.Time
+	HarnessID    string
+	HarnessToken string // plaintext until fetched
+	FetchedAt    *time.Time
+}
+
+func (r InitRequest) Claimed() bool { return r.ClaimedAt != nil }
 
 type AuditEntry struct {
 	At      time.Time
@@ -173,6 +199,28 @@ type OutboxStore interface {
 	PurgeOutbox(ctx context.Context, ackedBefore time.Time) (int64, error)
 }
 
+type BotStore interface {
+	// CreateBot: ErrConflict when the owner already has a bot or the username is taken.
+	CreateBot(ctx context.Context, b Bot) error
+	BotByOwner(ctx context.Context, mmUserID string) (Bot, error)
+	BotByUserID(ctx context.Context, botUserID string) (Bot, error)
+	ListBots(ctx context.Context) ([]Bot, error)
+}
+
+type InitStore interface {
+	CreateInit(ctx context.Context, r InitRequest) error
+	// InitByCode reads a request without side effects. ErrNotFound if unknown.
+	InitByCode(ctx context.Context, codeHash string) (InitRequest, error)
+	// ClaimInit binds the code to a harness. ErrNotFound if unknown or
+	// expired, ErrConflict if already claimed.
+	ClaimInit(ctx context.Context, codeHash string, now time.Time, harnessID, harnessToken string) error
+	// FetchInit returns the request; a claimed one is marked fetched and its
+	// token is handed out exactly once (ErrConflict afterwards). ErrNotFound
+	// if unknown or expired.
+	FetchInit(ctx context.Context, codeHash string, now time.Time) (InitRequest, error)
+	InitByHarness(ctx context.Context, harnessID string) (InitRequest, error)
+}
+
 type AuditStore interface {
 	Append(ctx context.Context, e AuditEntry) error
 }
@@ -183,6 +231,8 @@ type Store interface {
 	JobStore
 	ApprovalStore
 	OutboxStore
+	BotStore
+	InitStore
 	AuditStore
 	Close() error
 }
