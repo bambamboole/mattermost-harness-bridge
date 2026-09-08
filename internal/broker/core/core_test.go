@@ -495,3 +495,22 @@ func TestCancelInThread(t *testing.T) {
 		t.Fatalf("cancel for %s", sent.env.JobID)
 	}
 }
+
+func TestSplitWorkspace(t *testing.T) {
+	cases := map[string][2]string{
+		"ws:infra bump the provider":          {"infra", "bump the provider"},
+		"bump the provider ws:infra":          {"infra", "bump the provider"},
+		"bump the\nprovider\nws:infra please": {"infra", "bump the provider please"},
+		"`ws:infra` bump":                     {"infra", "bump"},
+		"ws:infra, bump":                      {"infra", "bump"},
+		"bump the provider":                   {"", "bump the provider"},
+		"ws: bump":                            {"", "ws: bump"},
+		"  ws:mhb Lies die README  ":          {"mhb", "Lies die README"},
+	}
+	for in, want := range cases {
+		ws, prompt := splitWorkspace(in)
+		if ws != want[0] || prompt != want[1] {
+			t.Errorf("splitWorkspace(%q) = %q, %q; want %q, %q", in, ws, prompt, want[0], want[1])
+		}
+	}
+}

@@ -237,7 +237,7 @@ func (c *Core) createJob(ctx context.Context, p *model.Post, text string) {
 		return
 	}
 	c.audit(ctx, p.UserId, "job.created", job.ID, map[string]any{"harness": harness.ID, "workspace": workspace, "queued": !online})
-	c.log.Info("job created", "job", job.ID, "user", user.Username, "harness", harness.ID, "queued", !online)
+	c.log.Info("job created", "job", job.ID, "user", user.Username, "harness", harness.ID, "workspace", workspace, "queued", !online)
 }
 
 // pickHarness: the user's most recently seen harness. One per user is the
@@ -802,18 +802,21 @@ func stripMention(msg, bot string) string {
 	return strings.TrimSpace(strings.ReplaceAll(msg, "@"+bot, ""))
 }
 
-// splitWorkspace pulls a leading "ws:<name>" token off the prompt.
+// splitWorkspace pulls the first "ws:<name>" token out of the prompt,
+// wherever it stands: people write the mention first, last, or on its own
+// line, and the token has to survive all of that.
 func splitWorkspace(text string) (string, string) {
-	text = strings.TrimSpace(text)
-	if !strings.HasPrefix(text, "ws:") {
-		return "", text
+	fields := strings.Fields(text)
+	for i, f := range fields {
+		f = strings.Trim(f, "`\"'.,;:")
+		if !strings.HasPrefix(f, "ws:") || len(f) == 3 {
+			continue
+		}
+		name := f[3:]
+		rest := append(append([]string{}, fields[:i]...), fields[i+1:]...)
+		return name, strings.Join(rest, " ")
 	}
-	rest := text[3:]
-	i := strings.IndexAny(rest, " \n\t")
-	if i < 0 {
-		return rest, ""
-	}
-	return rest[:i], strings.TrimSpace(rest[i:])
+	return "", strings.TrimSpace(text)
 }
 
 func renderProgress(harnessName string, p protocol.JobProgress) string {
