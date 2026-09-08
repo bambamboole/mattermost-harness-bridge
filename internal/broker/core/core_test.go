@@ -702,6 +702,15 @@ func TestUserBotRoutesToOwnerOnly(t *testing.T) {
 	if res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: ownerID, ChannelID: "chan3", Text: "join"}); !strings.Contains(res.Text, "no bot yet") {
 		t.Fatalf("join without bot: %+v", res)
 	}
+	// Direct messages take no bots; init and join say so instead of pretending.
+	f.mm.Channels["dm1"] = &model.Channel{Id: "dm1", Type: model.ChannelTypeDirect}
+	if res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, ChannelID: "dm1", TeamID: "team_1", Text: "join"}); !strings.Contains(res.Text, "direct or group") {
+		t.Fatalf("join in DM: %+v", res)
+	}
+	startDM, _ := f.core.StartInit(f.ctx, "", "phone")
+	if res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, ChannelID: "dm1", TeamID: "team_1", Text: "init " + startDM.Code}); !strings.Contains(res.Text, "direct or group") || f.mm.Memberships["dm1:"+bot.UserID] {
+		t.Fatalf("init in DM: %+v", res)
+	}
 	if res := f.core.HandleCommand(f.ctx, CommandRequest{UserID: otherID, Text: "status"}); !strings.Contains(res.Text, "mbp") {
 		t.Fatalf("status: %+v", res)
 	}

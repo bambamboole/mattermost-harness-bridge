@@ -169,18 +169,7 @@ func (c *Core) claimInit(ctx context.Context, args CommandRequest, code string) 
 	if err != nil {
 		return "", err
 	}
-	// The owner's bot posts in the channel; the shared bot must be there too,
-	// because only its connection sees the mentions.
-	for _, id := range []string{bot.UserID, c.cfg.BotUserID} {
-		if args.TeamID != "" {
-			if err := c.admin.AddTeamMember(ctx, args.TeamID, id); err != nil {
-				c.log.Warn("add team member", "user", id, "err", err)
-			}
-		}
-		if err := c.admin.AddChannelMember(ctx, args.ChannelID, id); err != nil {
-			c.log.Warn("add channel member", "user", id, "err", err)
-		}
-	}
+	joined := c.addBotsToChannel(ctx, args, bot)
 	name := strings.TrimSpace(req.HarnessName)
 	if name == "" {
 		name = "harness"
@@ -194,11 +183,40 @@ func (c *Core) claimInit(ctx context.Context, args CommandRequest, code string) 
 		return "", err
 	}
 	c.audit(ctx, user.Id, "harness.init", "", map[string]any{"harness": h.ID, "bot": bot.Username, "bot_created": created})
-	verb := "is"
+	verb := "is ready"
 	if created {
-		verb = "was created and is"
+		verb = "was created"
 	}
-	return fmt.Sprintf("Paired `%s`. Your bot @%s %s in this channel: mention it to run jobs on your machine. `/harness join` brings it into other channels.", name, bot.Username, verb), nil
+	where := "in this channel: mention it to run jobs on your machine. `/harness join` brings it into other channels."
+	if !joined {
+		where = "but bots cannot join direct or group messages: run `/harness join` in a channel, then mention it there."
+	}
+	return fmt.Sprintf("Paired `%s`. Your bot @%s %s %s", name, bot.Username, verb, where), nil
+}
+
+// addBotsToChannel adds the owner's bot and the shared listener bot to the
+// team and the channel the command was typed in. The listener must be
+// there because only its connection sees the mentions. Direct and group
+// messages take no bots; the owner is told to /harness join elsewhere.
+func (c *Core) addBotsToChannel(ctx context.Context, args CommandRequest, bot store.Bot) bool {
+	for _, id := range []string{bot.UserID, c.cfg.BotUserID} {
+		if args.TeamID != "" {
+			if err := c.admin.AddTeamMember(ctx, args.TeamID, id); err != nil {
+				c.log.Warn("add team member", "user", id, "err", err)
+			}
+		}
+	}
+	if ch, err := c.admin.GetChannel(ctx, args.ChannelID); err == nil && (ch.Type == model.ChannelTypeDirect || ch.Type == model.ChannelTypeGroup) {
+		return false
+	}
+	ok := true
+	for _, id := range []string{bot.UserID, c.cfg.BotUserID} {
+		if err := c.admin.AddChannelMember(ctx, args.ChannelID, id); err != nil {
+			c.log.Warn("add channel member", "user", id, "err", err)
+			ok = false
+		}
+	}
+	return ok
 }
 
 // ensureBot returns the owner's bot, creating it on first init.
@@ -239,13 +257,8 @@ func (c *Core) joinChannel(ctx context.Context, args CommandRequest) (string, er
 	if err != nil {
 		return "", errors.New("you have no bot yet; run `mhb harness init` on your machine first")
 	}
-	for _, id := range []string{b.UserID, c.cfg.BotUserID} {
-		if args.TeamID != "" {
-			_ = c.admin.AddTeamMember(ctx, args.TeamID, id)
-		}
-		if err := c.admin.AddChannelMember(ctx, args.ChannelID, id); err != nil {
-			return "", err
-		}
+	if !c.addBotsToChannel(ctx, args, b) {
+		return "", errors.New("bots cannot join direct or group messages; use `/harness join` in a channel")
 	}
 	return "@" + b.Username + " is now in this channel.", nil
 }
