@@ -55,6 +55,10 @@ type session struct {
 
 var ErrDisconnected = errors.New("client: not connected")
 
+// healthyConnection is how long a connection has to stand before the
+// reconnect backoff is considered spent and reset to its minimum.
+const healthyConnection = time.Minute
+
 // Run reconnects until ctx ends. Errors from a single connection are logged,
 // not returned; a permanent failure (unauthorized, version too old) ends Run.
 func (c *Client) Run(ctx context.Context) error {
@@ -69,6 +73,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	backoff := time.Second
 	for {
+		started := time.Now()
 		err := c.session(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -76,6 +81,11 @@ func (c *Client) Run(ctx context.Context) error {
 		switch wire.CloseStatus(err) {
 		case protocol.CloseUnauthorized, protocol.CloseVersionTooOld:
 			return err
+		}
+		// A connection that stood for a while was healthy; a broker restart
+		// hours from now should not inherit the old backoff.
+		if time.Since(started) > healthyConnection {
+			backoff = time.Second
 		}
 		c.Log.Warn("broker connection ended", "err", err, "retry_in", backoff)
 		jitter := time.Duration(rand.Int64N(int64(backoff / 4)))
@@ -85,9 +95,6 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-time.After(backoff + jitter):
 		}
 		backoff = min(backoff*2, c.MaxBackoff)
-		if err == nil {
-			backoff = time.Second
-		}
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mattermost/mattermost/server/public/model"
 
@@ -41,6 +42,9 @@ type Config struct {
 	JobTimeout      time.Duration
 	DefaultMaxTurns int
 	EditInterval    time.Duration // minimum gap between edits of one status post
+	// OutboxRetention is how long acked outbox rows are kept before Sweep
+	// deletes them. They exist only for debugging a delivery.
+	OutboxRetention time.Duration
 }
 
 func (c *Config) defaults() {
@@ -61,6 +65,9 @@ func (c *Config) defaults() {
 	}
 	if c.EditInterval == 0 {
 		c.EditInterval = 1200 * time.Millisecond
+	}
+	if c.OutboxRetention == 0 {
+		c.OutboxRetention = 24 * time.Hour
 	}
 }
 
@@ -216,7 +223,11 @@ func (c *Core) HandlePost(ctx context.Context, ev mattermost.PostedEvent) {
 		return
 	}
 	if target.owner != "" && target.owner != p.UserId {
-		c.replyAs(ctx, target.userID, p, fmt.Sprintf("Only @%s can run jobs on this machine.", target.ownerName))
+		who := "its owner"
+		if target.ownerName != "" {
+			who = "@" + target.ownerName
+		}
+		c.replyAs(ctx, target.userID, p, fmt.Sprintf("Only %s can run jobs on this machine.", who))
 		c.audit(ctx, p.UserId, "job.forbidden", "", map[string]any{"bot": target.username})
 		return
 	}
@@ -234,6 +245,7 @@ func (c *Core) HandlePost(ctx context.Context, ev mattermost.PostedEvent) {
 
 // mention is the bot a post addressed: the shared bot (owner "") or a
 // user's bot (owner set). A user bot wins when both are mentioned.
+// ownerName is the owner's @name, "" when Mattermost could not be asked.
 type mention struct {
 	userID    string
 	username  string
@@ -264,7 +276,7 @@ func (c *Core) mentionedBot(ctx context.Context, ev mattermost.PostedEvent) (men
 			if !names[b.Username] {
 				continue
 			}
-			m := mention{userID: b.UserID, username: b.Username, owner: b.MMUserID, ownerName: b.MMUserID}
+			m := mention{userID: b.UserID, username: b.Username, owner: b.MMUserID}
 			if u, err := c.mm.GetUser(ctx, b.MMUserID); err == nil {
 				m.ownerName = u.Username
 			}
@@ -835,9 +847,14 @@ func (c *Core) HandlePair(ctx context.Context, req PairRequest) (PairResponse, e
 // --- sweeper ---------------------------------------------------------------
 
 // Sweep runs the time-based transitions: queue expiry, lost harnesses, job
-// timeouts. Call it periodically.
+// timeouts, and deletes acked outbox rows. Call it periodically.
 func (c *Core) Sweep(ctx context.Context) {
 	now := c.now()
+	if n, err := c.st.PurgeOutbox(ctx, now.Add(-c.cfg.OutboxRetention)); err != nil {
+		c.log.Error("purge outbox", "err", err)
+	} else if n > 0 {
+		c.log.Debug("purged acked outbox messages", "count", n)
+	}
 	expired, err := c.st.ExpireQueuedJobs(ctx, now)
 	if err != nil {
 		c.log.Error("expire queued", "err", err)
@@ -914,11 +931,11 @@ func (c *Core) postResult(ctx context.Context, j store.Job, h store.Harness, r p
 	msg := meta + "\n\n" + body
 	api := c.api(ctx, j.BotUserID)
 	var fileIDs []string
-	if len(msg) > mattermost.MaxMessageLen-200 {
+	if runeLen(msg) > mattermost.MaxMessageLen-200 {
 		if fi, err := api.UploadFile(ctx, j.ChannelID, "result.md", []byte(body)); err == nil {
 			fileIDs = append(fileIDs, fi.Id)
 		}
-		msg = meta + "\n\n" + truncate(body, mattermost.MaxMessageLen-len(meta)-300) + "\n\n_(full output attached)_"
+		msg = meta + "\n\n" + truncate(body, mattermost.MaxMessageLen-runeLen(meta)-300) + "\n\n_(full output attached)_"
 	}
 	for _, f := range r.Files {
 		data, err := base64.StdEncoding.DecodeString(f.DataB64)
@@ -1096,7 +1113,7 @@ func renderProgress(harnessName string, p protocol.JobProgress) string {
 	if text == "" {
 		return head
 	}
-	return head + "\n\n" + truncate(text, mattermost.MaxMessageLen-len(head)-100)
+	return head + "\n\n" + truncate(text, mattermost.MaxMessageLen-runeLen(head)-100)
 }
 
 func nackText(a protocol.Ack) string {
@@ -1106,15 +1123,18 @@ func nackText(a protocol.Ack) string {
 	return a.Code
 }
 
+// runeLen counts characters the way Mattermost counts them; every budget
+// around MaxMessageLen is in runes, not bytes.
+func runeLen(s string) int { return utf8.RuneCountInString(s) }
+
 func truncate(s string, n int) string {
 	if n < 0 {
 		n = 0
 	}
-	r := []rune(s)
-	if len(r) <= n {
+	if runeLen(s) <= n {
 		return s
 	}
-	return string(r[:n]) + "…"
+	return string([]rune(s)[:n]) + "…"
 }
 
 func helpText(bot string) string {

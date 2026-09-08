@@ -136,9 +136,11 @@ func newHarnessWorkspaceCmd() *cobra.Command {
 }
 
 func newHarnessConfigCmd() *cobra.Command {
-	return &cobra.Command{
+	var showSecrets bool
+	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Print the config path and content",
+		Long:  "Prints the config. The harness token is redacted unless --show-secrets is given.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), harness.ConfigPath())
@@ -146,10 +148,17 @@ func newHarnessConfigCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !showSecrets {
+				if b, err = harness.RedactConfig(b); err != nil {
+					return err
+				}
+			}
 			_, _ = cmd.OutOrStdout().Write(b)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&showSecrets, "show-secrets", false, "print the harness token instead of redacting it")
+	return cmd
 }
 
 func newHarnessMCPCmd() *cobra.Command {
