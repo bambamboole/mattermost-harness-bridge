@@ -73,9 +73,17 @@ func fakeClaude() {
 		raw, _ := os.ReadFile(mcpPath)
 		_ = json.Unmarshal(raw, &cfg)
 		a := cfg.Servers[permission.ServerName].Args
+		flag := func(name string) string {
+			for i := range a {
+				if a[i] == name && i+1 < len(a) {
+					return a[i+1]
+				}
+			}
+			return ""
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		dec, err := permission.Ask(ctx, a[2], permission.Request{JobID: a[4], ToolName: "Bash",
+		dec, err := permission.Ask(ctx, flag("--socket"), permission.Request{JobID: flag("--job"), ToolName: "Bash",
 			Input: json.RawMessage(`{"command":"rm -rf node_modules"}`), ToolUseID: "toolu_1"})
 		if err != nil {
 			decision = "error: " + err.Error()

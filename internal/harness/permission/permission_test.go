@@ -64,7 +64,7 @@ func TestMCPConfigShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, ok := cfg.Servers[ServerName]
-	if !ok || s.Command != "/usr/local/bin/harness" || len(s.Args) != 5 || s.Args[4] != "job_1" {
+	if !ok || s.Command != "/usr/local/bin/harness" || len(s.Args) != 6 || s.Args[0] != "harness" || s.Args[5] != "job_1" {
 		t.Fatalf("config: %s", b)
 	}
 	if FullName != "mcp__harness__approve" {

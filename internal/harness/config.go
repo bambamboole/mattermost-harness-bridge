@@ -71,7 +71,7 @@ func LoadConfig() (Config, error) {
 	b, err := os.ReadFile(ConfigPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return cfg, fmt.Errorf("no config at %s; run `harness pair` first", ConfigPath())
+			return cfg, fmt.Errorf("no config at %s; run `mhb harness pair` first", ConfigPath())
 		}
 		return cfg, err
 	}
@@ -98,7 +98,7 @@ func SaveConfig(cfg Config) error {
 
 func (c Config) Validate() error {
 	if c.BrokerURL == "" || c.Token == "" || c.OwnerMMUserID == "" || c.HarnessID == "" {
-		return errors.New("config incomplete: broker_url, harness_id, token and owner_mm_user_id are required (run `harness pair`)")
+		return errors.New("config incomplete: broker_url, harness_id, token and owner_mm_user_id are required (run `mhb harness pair`)")
 	}
 	for name, dir := range c.Workspaces {
 		if !filepath.IsAbs(dir) {

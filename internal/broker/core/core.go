@@ -132,7 +132,7 @@ func (c *Core) handleDM(ctx context.Context, p *model.Post) {
 			c.reply(ctx, p, "Could not create a pairing code, see broker logs.")
 			return
 		}
-		c.reply(ctx, p, fmt.Sprintf("Run this on the machine that should execute your jobs (code valid for 10 minutes):\n```\nharness pair --broker %s %s\n```", c.cfg.PublicURL, code))
+		c.reply(ctx, p, fmt.Sprintf("Run this on the machine that should execute your jobs (code valid for 10 minutes):\n```\nmhb harness pair --broker %s %s\n```", c.cfg.PublicURL, code))
 	case "status":
 		c.reply(ctx, p, c.statusText(ctx, p.UserId))
 	default:

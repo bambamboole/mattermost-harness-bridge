@@ -11,17 +11,9 @@ env:
   - CGO_ENABLED=0
 
 builds:
-  - id: broker
-    main: ./cmd/broker
-    binary: broker
-    goos: [linux, darwin]
-    goarch: [amd64, arm64]
-    ldflags:
-      - -s -w -X github.com/bambamboole/mattermost-harness-bridge/internal/version.Version={{ .Version }}
-    mod_timestamp: "{{ .CommitTimestamp }}"
-  - id: harness
-    main: ./cmd/harness
-    binary: harness
+  - id: mhb
+    main: ./cmd/mhb
+    binary: mhb
     goos: [linux, darwin]
     goarch: [amd64, arm64]
     ldflags:
@@ -29,14 +21,9 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
-  - id: broker
-    ids: [broker]
-    name_template: "broker_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    formats: [tar.gz]
-    files: [LICENSE, README.md]
-  - id: harness
-    ids: [harness]
-    name_template: "harness_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: mhb
+    ids: [mhb]
+    name_template: "mhb_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     files: [LICENSE, README.md]
 

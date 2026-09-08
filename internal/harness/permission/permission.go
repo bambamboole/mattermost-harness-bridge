@@ -1,5 +1,5 @@
 // Package permission bridges the Claude CLI's --permission-prompt-tool to the
-// harness daemon. The CLI spawns `harness mcp-permissions` per job as an MCP
+// harness daemon. The CLI spawns `mhb harness mcp-permissions` per job as an MCP
 // stdio server; that subcommand forwards each tool call over a Unix socket to
 // the daemon, which asks the owner through the broker and answers.
 //
@@ -204,7 +204,7 @@ func MCPConfig(harnessBin, socket, jobID string) ([]byte, error) {
 		"mcpServers": map[string]any{
 			ServerName: map[string]any{
 				"command": harnessBin,
-				"args":    []string{"mcp-permissions", "--socket", socket, "--job", jobID},
+				"args":    []string{"harness", "mcp-permissions", "--socket", socket, "--job", jobID},
 			},
 		},
 	})

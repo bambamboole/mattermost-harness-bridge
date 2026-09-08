@@ -450,11 +450,11 @@ func TestPairingFlow(t *testing.T) {
 	f := newFixture(t)
 	f.core.HandlePost(f.ctx, mattermost.PostedEvent{Post: &model.Post{Id: "dm1", ChannelId: "dm_user_other", UserId: otherID, Message: "pair"}, ChannelType: "D"})
 	reply := f.mm.Last().Message
-	i := strings.Index(reply, "harness pair --broker https://broker.test ")
+	i := strings.Index(reply, "mhb harness pair --broker https://broker.test ")
 	if i < 0 {
 		t.Fatalf("pair reply: %q", reply)
 	}
-	code := strings.Fields(reply[i:])[4]
+	code := strings.Fields(reply[i:])[5]
 
 	if _, err := f.core.HandlePair(f.ctx, PairRequest{Code: "WRONG", Name: "x"}); err != ErrBadPairingCode {
 		t.Fatalf("wrong code: %v", err)

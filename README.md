@@ -8,10 +8,10 @@ permission become Allow/Deny buttons in the thread.
 Mattermost (cloud, bot @cc)
       ^ WS events down / REST posts up
       v
-Broker (Go, one public binary)          cmd/broker
+Broker (Go, public)                     mhb broker
       ^ jobs + approvals down / hello, progress, results up
       v
-Harness (Go, one per developer, NAT)    cmd/harness
+Harness (Go, one per developer, NAT)    mhb harness run
       v
 claude -p ... (subprocess per job)
 ```
@@ -19,10 +19,14 @@ claude -p ... (subprocess per job)
 Harnesses connect *outbound* to the broker over WebSocket. Nothing ever
 connects to a laptop. Only the owner of a harness can trigger it.
 
+One binary, `mhb`, serves both roles: `mhb broker` on the server,
+`mhb harness …` on developer machines.
+
 ## Layout
 
 | Path | What |
 |---|---|
+| `cmd/mhb`, `internal/cli` | The `mhb` binary and its cobra command tree |
 | `internal/protocol` | Wire protocol shared by both binaries: envelope, message types, ack rules |
 | `internal/store` | Broker persistence interface, CAS-style; `sqlite/` is the implementation, `storetest/` the conformance suite |
 | `internal/broker/hub` | WebSocket server for harnesses: auth, heartbeat, outbox delivery, connection replacement |
@@ -62,18 +66,23 @@ export MM_BOT_TOKEN=...
 export PUBLIC_URL=https://broker.example.com
 export CALLBACK_SECRET=$(openssl rand -hex 32)   # signs approval buttons
 export DB_PATH=/var/lib/broker/broker.db
-# optional: LISTEN_ADDR=:8080 QUEUE_TTL=5m GRACE_PERIOD=10m JOB_TIMEOUT=30m MIN_HARNESS_VERSION=0.1.0
-go run ./cmd/broker
+mhb broker
 ```
+
+Every setting is also a flag (`mhb broker --help`): `--mm-url`, `--mm-bot-token`,
+`--public-url`, `--callback-secret`, `--db`, `--listen`, `--queue-ttl`,
+`--grace-period`, `--job-timeout`, `--min-harness-version`. Flags win over
+environment variables.
 
 ## Harness setup (each developer)
 
 ```sh
-go build -o ~/bin/harness ./cmd/harness
+# grab mhb_<version>_<os>_<arch>.tar.gz from the GitHub release, or:
+go install github.com/bambamboole/mattermost-harness-bridge/cmd/mhb@latest
 # In Mattermost, DM the bot: `pair`  → it replies with a one-time code
-harness pair --broker https://broker.example.com <code>
-harness workspace add infra ~/Projects/artisan-os/infrastructure
-harness run
+mhb harness pair --broker https://broker.example.com <code>
+mhb harness workspace add infra ~/Projects/artisan-os/infrastructure
+mhb harness run
 ```
 
 Config lives in `~/Library/Application Support/mm-harness/config.json`
@@ -101,10 +110,11 @@ back. `--dangerously-skip-permissions` is never used.
 
 Conventional commits on `main` feed [release-please](https://github.com/googleapis/release-please),
 which opens a release PR and, on merge, creates the tag and GitHub release.
-The tag triggers `release.yml`: GoReleaser attaches `broker` and `harness`
-archives for linux/darwin × amd64/arm64 plus `checksums.txt`, and the broker
-image is pushed to `ghcr.io/bambamboole/mattermost-harness-bridge` as
-`<version>`, `<major>.<minor>` and `latest`.
+The tag triggers `release.yml`: GoReleaser attaches `mhb` archives for
+linux/darwin × amd64/arm64 plus `checksums.txt`, and the image (entrypoint
+`mhb`, default command `broker`) is pushed to
+`ghcr.io/bambamboole/mattermost-harness-bridge` as `<version>`,
+`<major>.<minor>` and `latest`.
 
 `release-please.yml` needs a `RELEASE_PLEASE_TOKEN` repository secret (a PAT
 with `contents` and `pull-requests` write): tags pushed with the default
@@ -122,7 +132,7 @@ docker run --rm -p 8080:8080 -v broker-data:/data \
 go test ./... -race      # unit, store conformance, end-to-end
 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.0 run ./...
 go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean --skip=publish
-docker build -t broker:local .
+docker build -t mhb:local .
 ```
 
 The permission-tool contract was verified against claude 2.1.263: the tool
