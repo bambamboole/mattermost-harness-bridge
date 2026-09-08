@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0](https://github.com/bambamboole/mattermost-harness-bridge/compare/v0.3.0...v0.4.0) (2026-09-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* add OAuth installation and multiple bots per user
+
+### Features
+
+* add OAuth installation and multiple bots per user ([54266ad](https://github.com/bambamboole/mattermost-harness-bridge/commit/54266adf119aea30d1e951e43604c78290cb04a7))
+
+
+### Bug Fixes
+
+* **broker:** handle posts off the Mattermost event loop ([a3cb451](https://github.com/bambamboole/mattermost-harness-bridge/commit/a3cb4511f823220eee55d61e2928c212f89d7115))
+* **broker:** recognise user bots from the [@name](https://github.com/name) in the message ([ec92442](https://github.com/bambamboole/mattermost-harness-bridge/commit/ec9244237c29c7a2579a3254e11993b6522ad708))
+* **broker:** rune-safe post budgets, outbox purge, owner naming ([7132186](https://github.com/bambamboole/mattermost-harness-bridge/commit/713218697d312b1e0cff6b39b50ede048adbbd26))
+* **harness:** cut chat text on rune boundaries ([0be4400](https://github.com/bambamboole/mattermost-harness-bridge/commit/0be44004c7b6c10e813cc8d618606a743055617b))
+* **harness:** redact the token in mhb harness config ([8ea6ba4](https://github.com/bambamboole/mattermost-harness-bridge/commit/8ea6ba4360e6dbc1fcb83b79258ce6dd553fe7e2))
+* **harness:** reset the reconnect backoff after a healthy connection ([1f86f67](https://github.com/bambamboole/mattermost-harness-bridge/commit/1f86f67c1a5afe3a8ca3b3c5527367f0306356d5))
+* **onboarding:** say so when the command ran in a direct or group message ([6fb5607](https://github.com/bambamboole/mattermost-harness-bridge/commit/6fb56070604f53794f58d141b571a0a8001d3ee3))
+
 ## [0.3.0](https://github.com/bambamboole/mattermost-harness-bridge/compare/v0.2.1...v0.3.0) (2026-09-08)
 
 
